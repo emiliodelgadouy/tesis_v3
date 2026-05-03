@@ -19,6 +19,11 @@ class ModelBuilder:
             focal_alpha=0.90,
             focal_gamma=2.0,
             checkpoint_monitor="val_pr_auc",
+            monitor_mode="max",
+            early_stopping_patience=6,
+            reduce_lr_patience=2,
+            reduce_lr_factor=0.5,
+            min_lr=1e-6,
     ):
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
@@ -31,6 +36,11 @@ class ModelBuilder:
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
         self.checkpoint_monitor = checkpoint_monitor
+        self.monitor_mode = monitor_mode
+        self.early_stopping_patience = early_stopping_patience
+        self.reduce_lr_patience = reduce_lr_patience
+        self.reduce_lr_factor = reduce_lr_factor
+        self.min_lr = min_lr
         self.checkpoint_dir = Path("checkpoints")
         self.checkpoint_path = self.checkpoint_dir / "best_checkpoint.weights.h5"
         self.fit_number = 0
@@ -180,6 +190,13 @@ class ModelBuilder:
         )
         return int(epoch_text)
 
+    def monitor_improved(self, current, best):
+        if best is None:
+            return True
+        if self.monitor_mode == "min":
+            return current < best
+        return current > best
+
     def checkpoint_callback(self):
         monitor = self.checkpoint_monitor
         stage = self.fit_number
@@ -192,7 +209,7 @@ class ModelBuilder:
                 return
 
             current = float(current)
-            if best_value[monitor] is not None and current <= best_value[monitor]:
+            if not self.monitor_improved(current, best_value[monitor]):
                 return
 
             checkpoint_path = self.checkpoint_filepath(epoch + 1)
@@ -224,9 +241,30 @@ class ModelBuilder:
 
         return keras.callbacks.LambdaCallback(on_epoch_end=on_epoch_end)
 
+    def early_stopping_callback(self):
+        return keras.callbacks.EarlyStopping(
+            monitor=self.checkpoint_monitor,
+            mode=self.monitor_mode,
+            patience=self.early_stopping_patience,
+            restore_best_weights=True,
+            verbose=1,
+        )
+
+    def reduce_lr_callback(self):
+        return keras.callbacks.ReduceLROnPlateau(
+            monitor=self.checkpoint_monitor,
+            mode=self.monitor_mode,
+            factor=self.reduce_lr_factor,
+            patience=self.reduce_lr_patience,
+            min_lr=self.min_lr,
+            verbose=1,
+        )
+
     def callbacks(self):
         return [
             self.checkpoint_callback(),
+            self.early_stopping_callback(),
+            self.reduce_lr_callback(),
             EpochTimer(),
         ]
 
@@ -272,7 +310,11 @@ class ModelBuilder:
         if not self.best_checkpoints:
             raise FileNotFoundError("No existen checkpoints registrados en esta corrida.")
 
-        checkpoint_info = max(self.best_checkpoints, key=lambda info: info["value"])
+        checkpoint_info = (
+            min(self.best_checkpoints, key=lambda info: info["value"])
+            if self.monitor_mode == "min"
+            else max(self.best_checkpoints, key=lambda info: info["value"])
+        )
         checkpoint_path = checkpoint_info["path"]
         if not Path(checkpoint_path).is_file():
             raise FileNotFoundError(f"No existe el checkpoint global: {checkpoint_path}")
