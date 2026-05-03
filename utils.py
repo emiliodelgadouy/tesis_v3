@@ -4,7 +4,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 import time
 from tensorflow import keras
 
-def make_patient_stratified_split(
+def stratified_split(
     ds,
     val_split=0.20,
     seed=42,
@@ -32,7 +32,7 @@ def make_patient_stratified_split(
     return tbl_train, tbl_val, tbl_test
 
 
-def make_binary_dataset(tbl, batch_size, shuffle, seed):
+def to_tf_dataset(tbl, IMAGE_SIZE, batch_size, shuffle, seed):
     paths = tf.constant(tbl["path"].values)
     labels = tf.constant(tbl["cls"].values.astype(np.float32))
     ds_tf = tf.data.Dataset.from_tensor_slices((paths, labels))
@@ -40,10 +40,16 @@ def make_binary_dataset(tbl, batch_size, shuffle, seed):
     if shuffle:
         ds_tf = ds_tf.shuffle(len(tbl), seed=seed, reshuffle_each_iteration=True)
 
+    def process(path, label):
+        img = decode_image(path)
+        img = tf.image.resize(img, IMAGE_SIZE)
+        return img, label
+
     ds_tf = ds_tf.map(
-        lambda path, label: (decode_image(path), label),
+        process,
         num_parallel_calls=tf.data.AUTOTUNE,
     )
+    ds_tf = ds_tf.cache()
     return ds_tf.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 
