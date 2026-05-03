@@ -34,6 +34,33 @@ PreprocessFunction = Callable
 InputSize = tuple[int, int]
 
 
+def custom_tiny_preprocess_input(x):
+    return x
+
+
+def CustomTinyBackbone(
+    weights: str | None = None,
+    include_top: bool = False,
+    input_shape: tuple[int, int, int] | None = None,
+    name: str = "custom_tiny",
+    **kwargs,
+) -> keras.Model:
+    """Backbone minimo para medir overhead de entrenamiento/inferencia."""
+    del weights
+
+    inputs = keras.Input(shape=input_shape or (64, 64, 3), name="input")
+    x = keras.layers.Rescaling(1.0 / 255.0, name="rescale")(inputs)
+    x = keras.layers.Conv2D(8, 3, strides=2, padding="same", activation="relu", name="conv_1")(x)
+    x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu", name="conv_2")(x)
+
+    if include_top:
+        classes = kwargs.pop("classes", 1000)
+        x = keras.layers.GlobalAveragePooling2D(name="avg_pool")(x)
+        x = keras.layers.Dense(classes, activation="softmax", name="predictions")(x)
+
+    return keras.Model(inputs, x, name=name)
+
+
 @dataclass(frozen=True)
 class BackboneConfig:
     name: str
@@ -43,6 +70,7 @@ class BackboneConfig:
 
 
 BACKBONES: dict[str, BackboneConfig] = {
+    "customtiny": BackboneConfig("custom_tiny", CustomTinyBackbone, custom_tiny_preprocess_input, (64, 64)),
     "vgg16": BackboneConfig("vgg16", VGG16, vgg16_preprocess_input, (224, 224)),
     "vgg19": BackboneConfig("vgg19", VGG19, vgg19_preprocess_input, (224, 224)),
     "efficientnetb0": BackboneConfig("efficientnetb0", EfficientNetB0, efficientnet_preprocess_input, (224, 224)),

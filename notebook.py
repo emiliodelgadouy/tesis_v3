@@ -50,7 +50,7 @@ def install_requirements_silent(requirements_path: str = "requirements.txt") -> 
 def configure_notebook(
     autoreload: bool = True,
     disable_bytecode: bool = True,
-    requirements_path: str = "requirements.txt",
+    requirements_path: str = "src/requirements.txt",
     install_requirements: bool = True,
     skip_requirements_in_colab: bool = True,
 ) -> None:

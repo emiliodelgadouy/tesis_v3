@@ -208,7 +208,26 @@ def add_cls_column(df: pd.DataFrame, config: DatasetConfig) -> pd.DataFrame:
     return df
 
 
-def build_dataset(config: DatasetConfig | None = None) -> dict[str, object]:
+def _sample_dataframe(
+    df: pd.DataFrame,
+    fraction: float,
+    seed: int | None,
+) -> pd.DataFrame:
+    if not 0 < fraction <= 1:
+        raise ValueError("sample_fraction debe estar entre 0 y 1.")
+
+    if df.empty or fraction == 1:
+        return df.copy()
+
+    return df.sample(frac=fraction, random_state=seed).copy()
+
+
+def build_dataset(
+    config: DatasetConfig | None = None,
+    reduced: bool = False,
+    sample_fraction: float = 0.10,
+    sample_seed: int | None = 42,
+) -> dict[str, object]:
     config = config or DatasetConfig()
     ds_raw = load_raw_dataframe(config)
     missing_columns = [column for column in config.filter_columns if column not in ds_raw.columns]
@@ -217,6 +236,9 @@ def build_dataset(config: DatasetConfig | None = None) -> dict[str, object]:
 
     ds_raw = add_cls_column(ds_raw, config)
     ds = ds_raw[ds_raw[list(config.filter_columns)].eq(1).any(axis=1)].copy()
+    if reduced:
+        ds = _sample_dataframe(ds, sample_fraction, sample_seed)
+
     return {
         "root": config.root_dir,
         "data_dir": config.data_dir,
@@ -225,4 +247,6 @@ def build_dataset(config: DatasetConfig | None = None) -> dict[str, object]:
         "csv_main": config.csv_main,
         "ds_raw": ds_raw,
         "ds": ds,
+        "reduced": reduced,
+        "sample_fraction": sample_fraction if reduced else 1.0,
     }

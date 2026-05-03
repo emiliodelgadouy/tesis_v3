@@ -1,7 +1,8 @@
 import numpy as np
 import tensorflow as tf
 from sklearn.model_selection import StratifiedGroupKFold
-
+import time
+from tensorflow import keras
 
 def make_patient_stratified_split(
     ds,
@@ -52,3 +53,16 @@ def decode_image(path):
     img.set_shape([None, None, 3])
     img = tf.image.convert_image_dtype(img, tf.float32) * 255.0
     return img
+
+class EpochTimer(keras.callbacks.Callback):
+    def on_train_begin(self, logs=None):
+        self.epoch_times = []
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_start_time = time.perf_counter()
+
+    def on_epoch_end(self, epoch, logs=None):
+        elapsed = time.perf_counter() - self.epoch_start_time
+        self.epoch_times.append(elapsed)
+        if logs is not None:
+            logs["epoch_time_seconds"] = elapsed

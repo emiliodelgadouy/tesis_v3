@@ -2,9 +2,20 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
 
+from src.utils import EpochTimer
+
 
 class ModelBuilder:
-    def __init__(self,IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3):
+    def __init__(
+            self,
+            IMG_SIZE,
+            backbone,
+            preprocess_input,
+            backbone_trainable=False,
+            top_dense=256,
+            dropout=0.4,
+            learning_rate=1e-3,
+    ):
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
         self.preprocess_input = preprocess_input
@@ -24,7 +35,7 @@ class ModelBuilder:
         x = layers.Resizing(self.input_shape[0], self.input_shape[1], crop_to_aspect_ratio=True, name="resize")(x)
         return x
 
-    def augmentation(self,x):
+    def augmentation(self, x):
         return keras.Sequential(
             [
                 layers.RandomContrast(0.08),
@@ -47,7 +58,14 @@ class ModelBuilder:
         return keras.optimizers.Adam(learning_rate=self.learning_rate)
 
     def loss(self):
-        return keras.losses.BinaryCrossentropy()
+        return self.focal_loss()
+
+    def focal_loss(self):
+        return keras.losses.BinaryFocalCrossentropy(
+            apply_class_balancing=True,
+            alpha=0.25,
+            gamma=2.0,
+        )
 
     def metrics(self):
         return [
@@ -56,17 +74,18 @@ class ModelBuilder:
             keras.metrics.Precision(name="precision"),
             keras.metrics.Recall(name="recall"),
         ]
+
     def make_backbone_trainable(self, trainable=True, learning_rate=None):
         self.backbone.trainable = trainable
         self.learning_rate = learning_rate
         self.compile()
 
         return self
-    
+
     def compile(self):
         self.model.compile(
             optimizer=self.optimizer(),
-            loss=self.loss(),
+            loss=self.focal_loss(),
             metrics=self.metrics(),
         )
         return self
@@ -83,13 +102,18 @@ class ModelBuilder:
         self.compile()
         return self
 
-    
     def summary(self):
         return self.model.summary()
 
     def fit(self, train_ds, val_ds, epochs=5, callbacks=None):
-        return self.model.fit(train_ds, validation_data=val_ds, epochs=epochs, callbacks=callbacks)
+        callbacks = list(callbacks or [])
+        callbacks.append(EpochTimer())
+        return self.model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=epochs,
+            callbacks=callbacks,
+        )
 
     def evaluate(self, test_ds, return_dict=True):
         return self.model.evaluate(test_ds, return_dict=return_dict)
-    
