@@ -37,9 +37,6 @@ def to_tf_dataset(tbl, IMAGE_SIZE, batch_size, shuffle, seed):
     labels = tf.constant(tbl["cls"].values.astype(np.float32))
     ds_tf = tf.data.Dataset.from_tensor_slices((paths, labels))
 
-    if shuffle:
-        ds_tf = ds_tf.shuffle(len(tbl), seed=seed, reshuffle_each_iteration=True)
-
     def process(path, label):
         img = decode_image(path)
         img = tf.image.resize(img, IMAGE_SIZE)
@@ -50,6 +47,10 @@ def to_tf_dataset(tbl, IMAGE_SIZE, batch_size, shuffle, seed):
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds_tf = ds_tf.cache()
+
+    if shuffle:
+        ds_tf = ds_tf.shuffle(len(tbl), seed=seed, reshuffle_each_iteration=True)
+
     return ds_tf.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 
