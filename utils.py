@@ -32,15 +32,73 @@ def stratified_split(
     return tbl_train, tbl_val, tbl_test
 
 
-def to_tf_dataset(tbl, IMAGE_SIZE, batch_size, shuffle, seed):
+def to_tf_dataset(
+    tbl,
+    IMAGE_SIZE,
+    batch_size,
+    shuffle,
+    seed,
+    *,
+    mil=False,
+    mil_num_instances=8,
+    mil_pool_size=None,
+):
+    """Si mil=True, cada elemento es una bolsa (K, H, W, 3) con la misma etiqueta de imagen.
+
+    Se reescala la imagen a mil_pool_size (por defecto 2x el parche) y se extraen K parches
+    de tamano IMAGE_SIZE. Train usa random_crop; val/test (shuffle=False) usa cortes
+    reproducibles por ruta (stateless_random_crop).
+    """
     paths = tf.constant(tbl["path"].values)
     labels = tf.constant(tbl["cls"].values.astype(np.float32))
     ds_tf = tf.data.Dataset.from_tensor_slices((paths, labels))
 
-    def process(path, label):
-        img = decode_image(path)
-        img = tf.image.resize(img, IMAGE_SIZE)
-        return img, label
+    ph, pw = int(IMAGE_SIZE[0]), int(IMAGE_SIZE[1])
+    train_mode = shuffle
+
+    if mil:
+        if mil_pool_size is None:
+            pool_hw = (ph * 2, pw * 2)
+        else:
+            pool_hw = (int(mil_pool_size[0]), int(mil_pool_size[1]))
+        if pool_hw[0] < ph or pool_hw[1] < pw:
+            raise ValueError(
+                f"mil_pool_size {pool_hw} debe ser >= tamano de parche ({ph}, {pw})"
+            )
+        mil_k = int(mil_num_instances)
+        if mil_k < 1:
+            raise ValueError("mil_num_instances debe ser >= 1")
+
+        def process(path, label):
+            img = decode_image(path)
+            img = tf.image.resize(img, pool_hw)
+            hpath = tf.strings.to_hash_bucket_fast(path, 2**31 - 1)
+            crops = []
+            for i in range(mil_k):
+                if train_mode:
+                    c = tf.image.random_crop(img, [ph, pw, 3])
+                else:
+                    seed_pair = tf.stack(
+                        [
+                            tf.cast(hpath + i, tf.int64),
+                            tf.cast(hpath + 1000 * i + 911, tf.int64),
+                        ],
+                        axis=0,
+                    )
+                    c = tf.image.stateless_random_crop(
+                        tf.cast(img, tf.float32), [ph, pw, 3], seed=seed_pair
+                    )
+                    c = tf.cast(c, img.dtype)
+                crops.append(c)
+            bag = tf.stack(crops, axis=0)
+            return bag, label
+
+    else:
+
+        def process(path, label):
+            img = decode_image(path)
+            img = tf.image.resize(img, IMAGE_SIZE)
+            return img, label
 
     ds_tf = ds_tf.map(
         process,

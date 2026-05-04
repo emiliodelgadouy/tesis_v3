@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
@@ -24,12 +25,18 @@ class ModelBuilder:
             reduce_lr_patience=2,
             reduce_lr_factor=0.5,
             min_lr=1e-6,
+            use_mil=False,
+            mil_num_instances=8,
+            mil_attention_dim=128,
     ):
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
         self.preprocess_input = preprocess_input
         self.backbone.trainable = backbone_trainable
         self.input_shape = backbone.input_shape[1:3]
+        self.use_mil = use_mil
+        self.mil_num_instances = int(mil_num_instances)
+        self.mil_attention_dim = int(mil_attention_dim)
         self.top_dense = top_dense
         self.dropout = dropout
         self.learning_rate = learning_rate
@@ -46,28 +53,52 @@ class ModelBuilder:
         self.fit_number = 0
         self.best_checkpoints = []
 
-    def head(self, x):
-        x = layers.GlobalAveragePooling2D(name="gap")(x)
+    def top_mlp(self, x):
         x = layers.Dense(self.top_dense, activation="relu", name="dense")(x)
         x = layers.Dropout(self.dropout, name="dropout")(x)
         return x
+
+    def head(self, x):
+        x = layers.GlobalAveragePooling2D(name="gap")(x)
+        return self.top_mlp(x)
+
+    def mil_attention_pool(self, x):
+        """Instancias (B, K, D) -> embedding de bolsa (B, D) con atencion tipo Ilse et al."""
+        x32 = tf.cast(x, tf.float32)
+        h = layers.Dense(
+            self.mil_attention_dim,
+            activation="tanh",
+            dtype="float32",
+            name="mil_attn_v",
+        )(x32)
+        scores = layers.Dense(1, dtype="float32", name="mil_attn_u")(h)
+        w = layers.Softmax(axis=1, name="mil_attn_softmax")(scores)
+        return layers.Lambda(
+            lambda tensors: tf.reduce_sum(tensors[0] * tensors[1], axis=1),
+            name="mil_bag_embedding",
+        )([x32, w])
 
     def resize(self, x):
         x = layers.Resizing(self.input_shape[0], self.input_shape[1], crop_to_aspect_ratio=True, name="resize")(x)
         return x
 
-    def augmentation(self, x):
+    def augmentation_seq(self):
         return keras.Sequential(
             [
                 layers.RandomContrast(0.08),
                 layers.RandomBrightness(0.08, value_range=(0.0, 255.0)),
             ],
             name="augmentation",
-        )(x)
+        )
+
+    def augmentation(self, x):
+        return self.augmentation_seq()(x)
 
     def inputs(self):
-        x = keras.Input(shape=(self.IMG_SIZE[0], self.IMG_SIZE[1], 3), name="image")
-        return x
+        if self.use_mil:
+            k, h, w = self.mil_num_instances, self.IMG_SIZE[0], self.IMG_SIZE[1]
+            return keras.Input(shape=(k, h, w, 3), name="bag")
+        return keras.Input(shape=(self.IMG_SIZE[0], self.IMG_SIZE[1], 3), name="image")
 
     def output(self, x):
         x = layers.Dense(1, dtype="float32", name="cls")(x)
@@ -143,19 +174,38 @@ class ModelBuilder:
             optimizer=self.optimizer(),
             loss=self.focal_loss(),
             metrics=self.metrics(),
-            jit_compile=True,
+            jit_compile=not self.use_mil,
         )
         return self
 
     def build(self):
+        if self.use_mil and self.mil_num_instances < 1:
+            raise ValueError("mil_num_instances debe ser >= 1 cuando use_mil=True")
         inputs = self.inputs()
-        # x = self.resize(inputs)
-        x = self.augmentation(inputs)
-        x = self.preprocess(x)
-        x = self.backbone(x)
-        x = self.head(x)
-        outputs = self.output(x)
-        self.model = keras.Model(inputs, outputs, name="simple_validation_vgg")
+        if self.use_mil:
+            x = layers.TimeDistributed(self.augmentation_seq(), name="td_augment")(inputs)
+            x = layers.TimeDistributed(
+                layers.Lambda(self.preprocess_input, name="preprocess_input_td"),
+                name="td_preprocess",
+            )(x)
+            x = layers.TimeDistributed(self.backbone, name="td_backbone")(x)
+            x = layers.TimeDistributed(
+                layers.GlobalAveragePooling2D(name="gap"),
+                name="td_gap",
+            )(x)
+            x = self.mil_attention_pool(x)
+            x = self.top_mlp(x)
+            outputs = self.output(x)
+            model_name = "mil_bag_classifier"
+        else:
+            # x = self.resize(inputs)
+            x = self.augmentation(inputs)
+            x = self.preprocess(x)
+            x = self.backbone(x)
+            x = self.head(x)
+            outputs = self.output(x)
+            model_name = "simple_validation_vgg"
+        self.model = keras.Model(inputs, outputs, name=model_name)
         self.compile()
         return self
 
