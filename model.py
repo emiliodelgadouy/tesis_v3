@@ -10,6 +10,7 @@ class MilAttentionPoolLayer(layers.Layer):
     """Instancias (B, K, D) -> embedding de bolsa (B, D) con atencion tipo Ilse et al."""
 
     def __init__(self, attention_dim: int, **kwargs):
+        kwargs.setdefault("dtype", "float32")
         super().__init__(**kwargs)
         self.attention_dim = int(attention_dim)
         self.dense_v = layers.Dense(
@@ -25,7 +26,7 @@ class MilAttentionPoolLayer(layers.Layer):
         x = keras.ops.cast(inputs, "float32")
         h = self.dense_v(x)
         scores = self.dense_u(h)
-        w = self.softmax(scores)
+        w = keras.ops.cast(self.softmax(scores), "float32")
         return keras.ops.sum(x * w, axis=1)
 
 
