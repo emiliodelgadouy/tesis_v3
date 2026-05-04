@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -82,6 +83,13 @@ def CustomTinyBackbone(
 # https://github.com/BMEII-AI/RadImageNet
 RADIMAGENET_FOLDER_ID = "1Es7cK1hv7zNHJoUW0tI0e6nLFVYTqPqK"
 
+# Bundle ZIP oficial con los cuatro modelos TF (~1.8 GB). Los .h5 quedan en
+# RadImageNet_models/ al extraer. Se usa si download_folder falla (muy comun sin cookies).
+RADIMAGENET_TF_BUNDLE_ID = "1UgYviv2K6QPM1SCexqqab5-yTgwoAFEc"
+RADIMAGENET_BUNDLE_ZIP_NAME = "RadImageNet_tensorflow_pretrained_bundle.zip"
+# Evita tratar como ZIP valido una pagina HTML de aviso de Google (~2 KB).
+MIN_RADIMAGENET_ZIP_BYTES = 100 * 1024 * 1024
+
 # Patrones para localizar cada arquitectura una vez descargada la carpeta.
 # El negative-lookahead en inception_v3 evita matchear el archivo de IRV2.
 RADIMAGENET_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -116,35 +124,101 @@ def _import_gdown():
     return gdown
 
 
+def _list_radimagenet_h5(cache_dir: Path) -> list[Path]:
+    return sorted(cache_dir.rglob("*.h5"))
+
+
 def _ensure_radimagenet_weights() -> Path:
     cache_dir = _medical_weights_dir() / "radimagenet"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    h5_files = list(cache_dir.rglob("*.h5"))
-    if len(h5_files) >= 4:
+    if _list_radimagenet_h5(cache_dir):
         return cache_dir
 
     gdown = _import_gdown()
-    print(f"Descargando pesos de RadImageNet a {cache_dir} (~300 MB) ...")
+
+    # 1) Carpeta de Drive (archivos sueltos). En Colab suele fallar sin cookies.
+    print(
+        f"Descargando RadImageNet (carpeta de Google Drive) en {cache_dir} ...\n"
+        "Si no aparecen .h5, se usara el bundle ZIP oficial (~1.8 GB, una sola vez)."
+    )
     gdown.download_folder(
         id=RADIMAGENET_FOLDER_ID,
         output=str(cache_dir),
         quiet=False,
-        use_cookies=False,
+        use_cookies=True,
     )
+    if _list_radimagenet_h5(cache_dir):
+        return cache_dir
+
+    # 2) Reintentar extraccion si ya hay un ZIP parcial/corrupto.
+    zip_path = cache_dir / RADIMAGENET_BUNDLE_ZIP_NAME
+    if zip_path.is_file():
+        if zip_path.stat().st_size < MIN_RADIMAGENET_ZIP_BYTES:
+            zip_path.unlink(missing_ok=True)
+        else:
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extractall(cache_dir)
+            except zipfile.BadZipFile:
+                zip_path.unlink(missing_ok=True)
+            else:
+                if _list_radimagenet_h5(cache_dir):
+                    try:
+                        zip_path.unlink()
+                    except OSError:
+                        pass
+                    return cache_dir
+
+    # 3) Bundle oficial (contiene RadImageNet_models/*.h5).
+    bundle_url = f"https://drive.google.com/uc?id={RADIMAGENET_TF_BUNDLE_ID}"
+    print(
+        "Descargando el bundle ZIP oficial de RadImageNet (~1.8 GB). "
+        "Puede tardar varios minutos; al terminar se borra el ZIP para ahorrar espacio."
+    )
+    gdown.download(bundle_url, str(zip_path), quiet=False)
+
+    if not zip_path.is_file() or zip_path.stat().st_size < MIN_RADIMAGENET_ZIP_BYTES:
+        zip_path.unlink(missing_ok=True)
+        raise FileNotFoundError(
+            "No se pudieron obtener los pesos RadImageNet (carpeta vacia y descarga del bundle "
+            "fallida o demasiado pequena, p. ej. aviso HTML de Google Drive).\n"
+            "Opciones:\n"
+            f"  1) Borrar la carpeta {cache_dir} y reintentar con mejor conexion.\n"
+            "  2) Descargar manualmente los .h5 desde https://github.com/BMEII-AI/RadImageNet "
+            f"y colocarlos bajo {cache_dir} (o define MEDICAL_WEIGHTS_DIR y copia a "
+            f"…/radimagenet/).\n"
+            "  3) En Colab, montar Drive y exportar MEDICAL_WEIGHTS_DIR a una ruta persistente."
+        )
+
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(cache_dir)
+    try:
+        zip_path.unlink()
+    except OSError:
+        pass
+
+    if not _list_radimagenet_h5(cache_dir):
+        raise FileNotFoundError(
+            f"No se encontraron archivos .h5 despues de extraer el bundle en {cache_dir}."
+        )
     return cache_dir
 
 
 def _radimagenet_weights_path(model_key: str) -> Path:
     cache_dir = _ensure_radimagenet_weights()
-    h5_files = list(cache_dir.rglob("*.h5"))
+    h5_files = _list_radimagenet_h5(cache_dir)
     patterns = [re.compile(p, re.IGNORECASE) for p in RADIMAGENET_NAME_PATTERNS[model_key]]
     for h5_file in h5_files:
         if any(pattern.search(h5_file.name) for pattern in patterns):
             return h5_file
+    all_files = sorted(p for p in cache_dir.rglob("*") if p.is_file())
+    sample = [str(p.relative_to(cache_dir)) for p in all_files[:50]]
+    extra = f"\n... y {len(all_files) - 50} archivos mas." if len(all_files) > 50 else ""
     raise FileNotFoundError(
         f"No se encontro archivo de pesos de RadImageNet para '{model_key}' en {cache_dir}.\n"
-        f"Archivos detectados: {[f.name for f in h5_files]}"
+        f"Archivos .h5 detectados: {[f.name for f in h5_files]}\n"
+        f"Archivos en cache (muestra): {sample}{extra}"
     )
 
 
