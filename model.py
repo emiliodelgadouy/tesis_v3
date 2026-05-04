@@ -1,10 +1,32 @@
 from pathlib import Path
 
-import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
 from src.utils import EpochTimer
+
+
+class MilAttentionPoolLayer(layers.Layer):
+    """Instancias (B, K, D) -> embedding de bolsa (B, D) con atencion tipo Ilse et al."""
+
+    def __init__(self, attention_dim: int, **kwargs):
+        super().__init__(**kwargs)
+        self.attention_dim = int(attention_dim)
+        self.dense_v = layers.Dense(
+            self.attention_dim,
+            activation="tanh",
+            dtype="float32",
+            name="mil_attn_v",
+        )
+        self.dense_u = layers.Dense(1, dtype="float32", name="mil_attn_u")
+        self.softmax = layers.Softmax(axis=1, name="mil_attn_softmax")
+
+    def call(self, inputs):
+        x = keras.ops.cast(inputs, "float32")
+        h = self.dense_v(x)
+        scores = self.dense_u(h)
+        w = self.softmax(scores)
+        return keras.ops.sum(x * w, axis=1)
 
 
 class ModelBuilder:
@@ -61,22 +83,6 @@ class ModelBuilder:
     def head(self, x):
         x = layers.GlobalAveragePooling2D(name="gap")(x)
         return self.top_mlp(x)
-
-    def mil_attention_pool(self, x):
-        """Instancias (B, K, D) -> embedding de bolsa (B, D) con atencion tipo Ilse et al."""
-        x32 = tf.cast(x, tf.float32)
-        h = layers.Dense(
-            self.mil_attention_dim,
-            activation="tanh",
-            dtype="float32",
-            name="mil_attn_v",
-        )(x32)
-        scores = layers.Dense(1, dtype="float32", name="mil_attn_u")(h)
-        w = layers.Softmax(axis=1, name="mil_attn_softmax")(scores)
-        return layers.Lambda(
-            lambda tensors: tf.reduce_sum(tensors[0] * tensors[1], axis=1),
-            name="mil_bag_embedding",
-        )([x32, w])
 
     def resize(self, x):
         x = layers.Resizing(self.input_shape[0], self.input_shape[1], crop_to_aspect_ratio=True, name="resize")(x)
@@ -193,7 +199,7 @@ class ModelBuilder:
                 layers.GlobalAveragePooling2D(name="gap"),
                 name="td_gap",
             )(x)
-            x = self.mil_attention_pool(x)
+            x = MilAttentionPoolLayer(self.mil_attention_dim, name="mil_bag_pool")(x)
             x = self.top_mlp(x)
             outputs = self.output(x)
             model_name = "mil_bag_classifier"
