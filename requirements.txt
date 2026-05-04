@@ -5,3 +5,4 @@ tensorflow[and-cuda]>=2.15,<2.17
 crcmod
 gsutil
 scikit-learn
+gdown>=5.1

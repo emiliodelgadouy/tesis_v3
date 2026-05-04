@@ -58,7 +58,7 @@ def decode_image(path):
     raw = tf.io.read_file(path)
     img = tf.image.decode_image(raw, channels=3, expand_animations=False)
     img.set_shape([None, None, 3])
-    img = tf.image.convert_image_dtype(img, tf.float32) * 255.0
+    img = tf.image.convert_image_dtype(img, tf.float16) * tf.cast(255.0, tf.float16)
     return img
 
 class EpochTimer(keras.callbacks.Callback):

@@ -70,7 +70,8 @@ class ModelBuilder:
         return x
 
     def output(self, x):
-        return layers.Dense(1, activation="sigmoid", dtype="float32", name="cls")(x)
+        x = layers.Dense(1, dtype="float32", name="cls")(x)
+        return layers.Activation("sigmoid", dtype="float32", name="output")(x)
 
     def preprocess(self, x):
         return layers.Lambda(self.preprocess_input, name="preprocess_input")(x)
@@ -142,6 +143,7 @@ class ModelBuilder:
             optimizer=self.optimizer(),
             loss=self.focal_loss(),
             metrics=self.metrics(),
+            jit_compile=True,
         )
         return self
 

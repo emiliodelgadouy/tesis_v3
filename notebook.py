@@ -56,6 +56,8 @@ def configure_notebook(
 ) -> None:
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+    os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
+    os.environ["TF_GPU_THREAD_COUNT"] = "2"
     if disable_bytecode:
         sys.dont_write_bytecode = True
 

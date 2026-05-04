@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from tensorflow import keras
+from tensorflow.keras import layers
 from tensorflow.keras.applications import (
+    DenseNet121,
     EfficientNetB0,
     EfficientNetB1,
     EfficientNetB2,
@@ -20,9 +25,13 @@ from tensorflow.keras.applications import (
     EfficientNetV2L,
     EfficientNetV2M,
     EfficientNetV2S,
+    InceptionResNetV2,
+    InceptionV3,
+    ResNet50,
     VGG16,
     VGG19,
 )
+from tensorflow.keras.applications.densenet import preprocess_input as densenet_preprocess_input
 from tensorflow.keras.applications.efficientnet import preprocess_input as efficientnet_preprocess_input
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input as efficientnet_v2_preprocess_input
 from tensorflow.keras.applications.vgg16 import preprocess_input as vgg16_preprocess_input
@@ -49,17 +58,255 @@ def CustomTinyBackbone(
     del weights
 
     inputs = keras.Input(shape=input_shape or (64, 64, 3), name="input")
-    x = keras.layers.Rescaling(1.0 / 255.0, name="rescale")(inputs)
-    x = keras.layers.Conv2D(8, 3, strides=2, padding="same", activation="relu", name="conv_1")(x)
-    x = keras.layers.Conv2D(16, 3, strides=2, padding="same", activation="relu", name="conv_2")(x)
+    x = layers.Rescaling(1.0 / 255.0, name="rescale")(inputs)
+    x = layers.Conv2D(8, 3, strides=2, padding="same", activation="relu", name="conv_1")(x)
+    x = layers.Conv2D(16, 3, strides=2, padding="same", activation="relu", name="conv_2")(x)
 
     if include_top:
         classes = kwargs.pop("classes", 1000)
-        x = keras.layers.GlobalAveragePooling2D(name="avg_pool")(x)
-        x = keras.layers.Dense(classes, activation="softmax", name="predictions")(x)
+        x = layers.GlobalAveragePooling2D(name="avg_pool")(x)
+        x = layers.Dense(classes, activation="softmax", name="predictions")(x)
 
     return keras.Model(inputs, x, name=name)
 
+
+# ---------------------------------------------------------------------------
+# Backbones medicos: RadImageNet (Mei et al., Radiology AI 2022) y CheXNet
+# (Rajpurkar et al., port de brucechou1983).
+#
+# Los pesos oficiales solo se distribuyen via Google Drive, por lo que se
+# descargan con gdown y se cachean localmente (override con MEDICAL_WEIGHTS_DIR).
+# ---------------------------------------------------------------------------
+
+# Carpeta oficial con los .h5 de RadImageNet en formato TF/Keras.
+# https://github.com/BMEII-AI/RadImageNet
+RADIMAGENET_FOLDER_ID = "1Es7cK1hv7zNHJoUW0tI0e6nLFVYTqPqK"
+
+# Patrones para localizar cada arquitectura una vez descargada la carpeta.
+# El negative-lookahead en inception_v3 evita matchear el archivo de IRV2.
+RADIMAGENET_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
+    "densenet121": (r"densenet[_-]?121",),
+    "resnet50": (r"resnet[_-]?50",),
+    "inceptionv3": (r"inception[_-]?v3(?!.*resnet)",),
+    "irv2": (r"irv2", r"inception[_-]?resnet[_-]?v2"),
+}
+
+# CheXNet (DenseNet121 + Dense(14) sigmoid) sobre NIH ChestX-ray14.
+# https://github.com/brucechou1983/CheXNet-Keras
+CHEXNET_FILE_ID = "19BllaOvs2x5PLV_vlWMy4i8LapLb2j6b"
+CHEXNET_FILE_NAME = "CheXNet_weights.h5"
+CHEXNET_NUM_CLASSES = 14
+
+
+def _medical_weights_dir() -> Path:
+    custom = os.environ.get("MEDICAL_WEIGHTS_DIR")
+    base = Path(custom) if custom else Path.home() / ".keras" / "medical_weights"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _import_gdown():
+    try:
+        import gdown
+    except ImportError as exc:
+        raise ImportError(
+            "Se requiere 'gdown' para descargar pesos pre-entrenados medicos. "
+            "Instalalo con: pip install gdown"
+        ) from exc
+    return gdown
+
+
+def _ensure_radimagenet_weights() -> Path:
+    cache_dir = _medical_weights_dir() / "radimagenet"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    h5_files = list(cache_dir.rglob("*.h5"))
+    if len(h5_files) >= 4:
+        return cache_dir
+
+    gdown = _import_gdown()
+    print(f"Descargando pesos de RadImageNet a {cache_dir} (~300 MB) ...")
+    gdown.download_folder(
+        id=RADIMAGENET_FOLDER_ID,
+        output=str(cache_dir),
+        quiet=False,
+        use_cookies=False,
+    )
+    return cache_dir
+
+
+def _radimagenet_weights_path(model_key: str) -> Path:
+    cache_dir = _ensure_radimagenet_weights()
+    h5_files = list(cache_dir.rglob("*.h5"))
+    patterns = [re.compile(p, re.IGNORECASE) for p in RADIMAGENET_NAME_PATTERNS[model_key]]
+    for h5_file in h5_files:
+        if any(pattern.search(h5_file.name) for pattern in patterns):
+            return h5_file
+    raise FileNotFoundError(
+        f"No se encontro archivo de pesos de RadImageNet para '{model_key}' en {cache_dir}.\n"
+        f"Archivos detectados: {[f.name for f in h5_files]}"
+    )
+
+
+def _ensure_chexnet_weights() -> Path:
+    cache_dir = _medical_weights_dir() / "chexnet"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    weights_path = cache_dir / CHEXNET_FILE_NAME
+    if weights_path.is_file():
+        return weights_path
+
+    gdown = _import_gdown()
+    print(f"Descargando pesos de CheXNet a {weights_path} (~30 MB) ...")
+    gdown.download(
+        id=CHEXNET_FILE_ID,
+        output=str(weights_path),
+        quiet=False,
+    )
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"No se pudo descargar CheXNet a {weights_path}")
+    return weights_path
+
+
+def radimagenet_preprocess_input(x):
+    """Preprocesamiento usado en el sample code oficial de RadImageNet (rescale 1/255)."""
+    return x / 255.0
+
+
+def chexnet_preprocess_input(x):
+    return densenet_preprocess_input(x)
+
+
+def _build_radimagenet_backbone(
+    base_model_fn: ModelFactory,
+    model_key: str,
+    weights,
+    include_top: bool,
+    input_shape: tuple[int, int, int] | None,
+    name: str,
+    **kwargs,
+) -> keras.Model:
+    if include_top:
+        raise ValueError(
+            "Los pesos RadImageNet solo soportan include_top=False (sin cabeza)."
+        )
+
+    if weights == "radimagenet":
+        base_model = base_model_fn(
+            weights=None, include_top=False, input_shape=input_shape, **kwargs
+        )
+        weights_path = _radimagenet_weights_path(model_key)
+        base_model.load_weights(str(weights_path))
+    elif weights == "imagenet":
+        base_model = base_model_fn(
+            weights="imagenet", include_top=False, input_shape=input_shape, **kwargs
+        )
+    elif weights is None:
+        base_model = base_model_fn(
+            weights=None, include_top=False, input_shape=input_shape, **kwargs
+        )
+    else:
+        base_model = base_model_fn(
+            weights=None, include_top=False, input_shape=input_shape, **kwargs
+        )
+        base_model.load_weights(str(weights))
+
+    base_model._name = name
+    return base_model
+
+
+def RadImageNetDenseNet121(
+    weights="radimagenet",
+    include_top: bool = False,
+    input_shape: tuple[int, int, int] | None = None,
+    name: str = "radimagenet_densenet121",
+    **kwargs,
+) -> keras.Model:
+    return _build_radimagenet_backbone(
+        DenseNet121, "densenet121", weights, include_top, input_shape, name, **kwargs
+    )
+
+
+def RadImageNetResNet50(
+    weights="radimagenet",
+    include_top: bool = False,
+    input_shape: tuple[int, int, int] | None = None,
+    name: str = "radimagenet_resnet50",
+    **kwargs,
+) -> keras.Model:
+    return _build_radimagenet_backbone(
+        ResNet50, "resnet50", weights, include_top, input_shape, name, **kwargs
+    )
+
+
+def RadImageNetInceptionV3(
+    weights="radimagenet",
+    include_top: bool = False,
+    input_shape: tuple[int, int, int] | None = None,
+    name: str = "radimagenet_inceptionv3",
+    **kwargs,
+) -> keras.Model:
+    return _build_radimagenet_backbone(
+        InceptionV3, "inceptionv3", weights, include_top, input_shape, name, **kwargs
+    )
+
+
+def RadImageNetInceptionResNetV2(
+    weights="radimagenet",
+    include_top: bool = False,
+    input_shape: tuple[int, int, int] | None = None,
+    name: str = "radimagenet_inceptionresnetv2",
+    **kwargs,
+) -> keras.Model:
+    return _build_radimagenet_backbone(
+        InceptionResNetV2, "irv2", weights, include_top, input_shape, name, **kwargs
+    )
+
+
+def CheXNetDenseNet121(
+    weights="chexnet",
+    include_top: bool = False,
+    input_shape: tuple[int, int, int] | None = None,
+    name: str = "chexnet_densenet121",
+    **kwargs,
+) -> keras.Model:
+    if include_top:
+        raise ValueError(
+            "CheXNet solo soporta include_top=False (la cabeza original es de 14 clases)."
+        )
+
+    backbone = DenseNet121(
+        weights=None, include_top=False, input_shape=input_shape, **kwargs
+    )
+
+    if weights == "chexnet":
+        # El .h5 publico contiene DenseNet121 + GlobalAveragePooling2D + Dense(14) sigmoid.
+        # Reconstruimos esa arquitectura, cargamos pesos, y nos quedamos solo con el backbone.
+        weights_path = _ensure_chexnet_weights()
+        gap = layers.GlobalAveragePooling2D(name="avg_pool")(backbone.output)
+        predictions = layers.Dense(
+            CHEXNET_NUM_CLASSES, activation="sigmoid", name="predictions"
+        )(gap)
+        full_model = keras.Model(
+            inputs=backbone.input, outputs=predictions, name="chexnet_full"
+        )
+        full_model.load_weights(str(weights_path))
+    elif weights == "imagenet":
+        imagenet_backbone = DenseNet121(
+            weights="imagenet", include_top=False, input_shape=input_shape, **kwargs
+        )
+        backbone.set_weights(imagenet_backbone.get_weights())
+    elif weights is None:
+        pass
+    else:
+        backbone.load_weights(str(weights))
+
+    backbone._name = name
+    return backbone
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class BackboneConfig:
@@ -67,10 +314,14 @@ class BackboneConfig:
     model_fn: ModelFactory
     preprocess_input: PreprocessFunction
     input_size: InputSize
+    default_weights: str | None = "imagenet"
 
 
 BACKBONES: dict[str, BackboneConfig] = {
-    "customtiny": BackboneConfig("custom_tiny", CustomTinyBackbone, custom_tiny_preprocess_input, (64, 64)),
+    "customtiny": BackboneConfig(
+        "custom_tiny", CustomTinyBackbone, custom_tiny_preprocess_input, (64, 64),
+        default_weights=None,
+    ),
     "vgg16": BackboneConfig("vgg16", VGG16, vgg16_preprocess_input, (224, 224)),
     "vgg19": BackboneConfig("vgg19", VGG19, vgg19_preprocess_input, (224, 224)),
     "efficientnetb0": BackboneConfig("efficientnetb0", EfficientNetB0, efficientnet_preprocess_input, (224, 224)),
@@ -88,7 +339,45 @@ BACKBONES: dict[str, BackboneConfig] = {
     "efficientnetv2s": BackboneConfig("efficientnetv2s", EfficientNetV2S, efficientnet_v2_preprocess_input, (384, 384)),
     "efficientnetv2m": BackboneConfig("efficientnetv2m", EfficientNetV2M, efficientnet_v2_preprocess_input, (480, 480)),
     "efficientnetv2l": BackboneConfig("efficientnetv2l", EfficientNetV2L, efficientnet_v2_preprocess_input, (480, 480)),
+    "radimagenetdensenet121": BackboneConfig(
+        "radimagenet_densenet121",
+        RadImageNetDenseNet121,
+        radimagenet_preprocess_input,
+        (224, 224),
+        default_weights="radimagenet",
+    ),
+    "radimagenetresnet50": BackboneConfig(
+        "radimagenet_resnet50",
+        RadImageNetResNet50,
+        radimagenet_preprocess_input,
+        (224, 224),
+        default_weights="radimagenet",
+    ),
+    "radimagenetinceptionv3": BackboneConfig(
+        "radimagenet_inceptionv3",
+        RadImageNetInceptionV3,
+        radimagenet_preprocess_input,
+        (299, 299),
+        default_weights="radimagenet",
+    ),
+    "radimagenetinceptionresnetv2": BackboneConfig(
+        "radimagenet_inceptionresnetv2",
+        RadImageNetInceptionResNetV2,
+        radimagenet_preprocess_input,
+        (299, 299),
+        default_weights="radimagenet",
+    ),
+    "chexnet": BackboneConfig(
+        "chexnet_densenet121",
+        CheXNetDenseNet121,
+        chexnet_preprocess_input,
+        (224, 224),
+        default_weights="chexnet",
+    ),
 }
+
+
+_DEFAULT_WEIGHTS = object()
 
 
 def _normalize_name(name: str) -> str:
@@ -117,12 +406,14 @@ def get_input_size(name: str) -> InputSize:
 
 def build_backbone(
     name: str,
-    weights: str | None = "imagenet",
+    weights=_DEFAULT_WEIGHTS,
     include_top: bool = False,
     input_shape: tuple[int, int, int] | None = None,
     **kwargs,
 ) -> keras.Model:
     config = get_backbone_config(name)
+    if weights is _DEFAULT_WEIGHTS:
+        weights = config.default_weights
     height, width = config.input_size
     return config.model_fn(
         weights=weights,
@@ -131,6 +422,8 @@ def build_backbone(
         name=config.name,
         **kwargs,
     )
+
+
 def resolve_backbone(backbone_name):
     backbone = build_backbone(backbone_name)
     preprocess_input = get_preprocess_input(backbone_name)

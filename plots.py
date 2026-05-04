@@ -37,6 +37,7 @@ def plot_history(
         best_metric_name="pr_auc",
         best_auc_epochs=None,
         cols=2,
+        backbone_name=None,
 ):
     histories = _as_history_list(history)
     hist = _join_histories(histories)
@@ -96,5 +97,9 @@ def plot_history(
     for ax in axes[len(metric_names):]:
         ax.axis("off")
 
-    fig.tight_layout()
+    if backbone_name:
+        fig.suptitle(backbone_name, fontsize=14, fontweight="bold")
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+    else:
+        fig.tight_layout()
     plt.show()
