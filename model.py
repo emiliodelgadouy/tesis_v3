@@ -51,6 +51,7 @@ class ModelBuilder:
             use_mil=False,
             mil_num_instances=8,
             mil_attention_dim=128,
+            aggressive_augmentation=False,
     ):
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
@@ -60,6 +61,7 @@ class ModelBuilder:
         self.use_mil = use_mil
         self.mil_num_instances = int(mil_num_instances)
         self.mil_attention_dim = int(mil_attention_dim)
+        self.aggressive_augmentation = bool(aggressive_augmentation)
         self.top_dense = top_dense
         self.dropout = dropout
         self.learning_rate = learning_rate
@@ -90,6 +92,32 @@ class ModelBuilder:
         return x
 
     def augmentation_seq(self):
+        if self.aggressive_augmentation:
+            return keras.Sequential(
+                [
+                    layers.RandomFlip("horizontal", name="aug_flip_h"),
+                    layers.RandomRotation(0.14, fill_mode="reflect", name="aug_rot"),
+                    layers.RandomZoom(
+                        height_factor=(0.0, 0.22),
+                        width_factor=(0.0, 0.22),
+                        fill_mode="reflect",
+                        name="aug_zoom",
+                    ),
+                    layers.RandomTranslation(
+                        height_factor=0.14,
+                        width_factor=0.14,
+                        fill_mode="reflect",
+                        name="aug_translate",
+                    ),
+                    layers.RandomContrast(0.25, name="aug_contrast"),
+                    layers.RandomBrightness(
+                        0.25,
+                        value_range=(0.0, 255.0),
+                        name="aug_brightness",
+                    ),
+                ],
+                name="augmentation_aggressive",
+            )
         return keras.Sequential(
             [
                 layers.RandomContrast(0.08),
