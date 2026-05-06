@@ -2,6 +2,7 @@ from pathlib import Path
 
 from tensorflow import keras
 from tensorflow.keras import layers
+import tensorflow as tf
 
 from src.utils import EpochTimer
 
@@ -32,26 +33,27 @@ class MilAttentionPoolLayer(layers.Layer):
 
 class ModelBuilder:
     def __init__(
-            self,
-            IMG_SIZE,
-            backbone,
-            preprocess_input,
-            backbone_trainable=False,
-            top_dense=256,
-            dropout=0.4,
-            learning_rate=1e-3,
-            focal_alpha=0.90,
-            focal_gamma=2.0,
-            checkpoint_monitor="val_pr_auc",
-            monitor_mode="max",
-            early_stopping_patience=6,
-            reduce_lr_patience=2,
-            reduce_lr_factor=0.5,
-            min_lr=1e-6,
-            use_mil=False,
-            mil_num_instances=8,
-            mil_attention_dim=128,
-            aggressive_augmentation=False,
+        self,
+        IMG_SIZE,
+        backbone,
+        preprocess_input,
+        backbone_trainable=False,
+        top_dense=256,
+        dropout=0.4,
+        learning_rate=1e-3,
+        focal_alpha=0.90,
+        focal_gamma=2.0,
+        checkpoint_monitor="val_pr_auc",
+        monitor_mode="max",
+        early_stopping_patience=6,
+        reduce_lr_patience=2,
+        reduce_lr_factor=0.5,
+        min_lr=1e-6,
+        use_mil=False,
+        mil_num_instances=8,
+        mil_attention_dim=128,
+        aggressive_augmentation=False,
+        initial_bias=None,
     ):
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
@@ -77,6 +79,8 @@ class ModelBuilder:
         self.checkpoint_path = self.checkpoint_dir / "best_checkpoint.weights.h5"
         self.fit_number = 0
         self.best_checkpoints = []
+        self.initial_bias = initial_bias
+        self.loss_from_logits = True
 
     def top_mlp(self, x):
         x = layers.Dense(self.top_dense, activation="relu", name="dense")(x)
@@ -136,8 +140,16 @@ class ModelBuilder:
         return keras.Input(shape=(self.IMG_SIZE[0], self.IMG_SIZE[1], 3), name="image")
 
     def output(self, x):
-        x = layers.Dense(1, dtype="float32", name="cls")(x)
-        return layers.Activation("sigmoid", dtype="float32", name="output")(x)
+        # Keep classifier head in float32 for numeric stability under mixed precision.
+        bias_init = (
+            tf.keras.initializers.Constant(self.initial_bias)
+            if self.initial_bias is not None
+            else "zeros"
+        )
+        x = layers.Dense(1, dtype="float32", bias_initializer=bias_init, name="output")(x)
+        if self.loss_from_logits:
+            return x
+        return layers.Activation("sigmoid", dtype="float32", name="output_sigmoid")(x)
 
     def preprocess(self, x):
         return layers.Lambda(self.preprocess_input, name="preprocess_input")(x)
@@ -153,15 +165,17 @@ class ModelBuilder:
             apply_class_balancing=True,
             alpha=self.focal_alpha,
             gamma=self.focal_gamma,
+            from_logits=self.loss_from_logits,
         )
 
     def metrics(self):
+        threshold = 0.0 if self.loss_from_logits else 0.5
         return [
-            keras.metrics.BinaryAccuracy(name="accuracy"),
-            keras.metrics.AUC(name="auc"),
-            keras.metrics.AUC(curve="PR", name="pr_auc"),
-            keras.metrics.Precision(name="precision"),
-            keras.metrics.Recall(name="recall"),
+            keras.metrics.BinaryAccuracy(name="accuracy", threshold=threshold),
+            keras.metrics.AUC(name="auc", from_logits=self.loss_from_logits),
+            keras.metrics.AUC(curve="PR", name="pr_auc", from_logits=self.loss_from_logits),
+            keras.metrics.Precision(name="precision", thresholds=threshold),
+            keras.metrics.Recall(name="recall", thresholds=threshold),
         ]
 
     def keep_batch_norm_frozen(self):
@@ -180,10 +194,10 @@ class ModelBuilder:
         return self
 
     def make_backbone_partially_trainable(
-            self,
-            trainable_fraction=0.30,
-            learning_rate=None,
-            train_batch_norm=False,
+        self,
+        trainable_fraction=0.30,
+        learning_rate=None,
+        train_batch_norm=False,
     ):
         total_layers = len(self.backbone.layers)
         trainable_layers = max(1, round(total_layers * trainable_fraction))
@@ -253,28 +267,22 @@ class ModelBuilder:
         suffix = ".weights.h5"
         checkpoint_name = checkpoint_path.name
         if checkpoint_name.endswith(suffix):
-            checkpoint_name = checkpoint_name[:-len(suffix)]
+            checkpoint_name = checkpoint_name[: -len(suffix)]
 
-        return checkpoint_path.with_name(
-            f"{checkpoint_name}_epoch{epoch:02d}{suffix}"
-        )
+        return checkpoint_path.with_name(f"{checkpoint_name}_epoch{epoch:02d}{suffix}")
 
     def checkpoint_files(self):
         checkpoint_path = Path(self.checkpoint_path)
         suffix = ".weights.h5"
         checkpoint_name = checkpoint_path.name
         if checkpoint_name.endswith(suffix):
-            checkpoint_name = checkpoint_name[:-len(suffix)]
+            checkpoint_name = checkpoint_name[: -len(suffix)]
 
-        return checkpoint_path.parent.glob(
-            f"{checkpoint_name}_epoch*{suffix}"
-        )
+        return checkpoint_path.parent.glob(f"{checkpoint_name}_epoch*{suffix}")
 
     def checkpoint_info(self, checkpoint_path):
         checkpoint_name = Path(checkpoint_path).name
-        epoch_text = checkpoint_name.rsplit("_epoch", 1)[1].removesuffix(
-            ".weights.h5"
-        )
+        epoch_text = checkpoint_name.rsplit("_epoch", 1)[1].removesuffix(".weights.h5")
         return int(epoch_text)
 
     def monitor_improved(self, current, best):
@@ -308,10 +316,7 @@ class ModelBuilder:
                     previous_checkpoint_path.unlink()
 
             best_value[monitor] = current
-            self.best_checkpoints = [
-                info for info in self.best_checkpoints
-                if info["stage"] != stage
-            ]
+            self.best_checkpoints = [info for info in self.best_checkpoints if info["stage"] != stage]
             self.best_checkpoints.append(
                 {
                     "stage": stage,
@@ -321,10 +326,7 @@ class ModelBuilder:
                     "path": checkpoint_path,
                 }
             )
-            print(
-                f"\nEpoch {epoch + 1}: {monitor} improved to {current:.4f}. "
-                f"Saved {checkpoint_path}"
-            )
+            print(f"\nEpoch {epoch + 1}: {monitor} improved to {current:.4f}. Saved {checkpoint_path}")
 
         return keras.callbacks.LambdaCallback(on_epoch_end=on_epoch_end)
 
@@ -369,10 +371,7 @@ class ModelBuilder:
     def load_best_checkpoint(self):
         stage = self.fit_number
         checkpoint_info = next(
-            (
-                info for info in self.best_checkpoints
-                if info["stage"] == stage
-            ),
+            (info for info in self.best_checkpoints if info["stage"] == stage),
             None,
         )
 
@@ -397,11 +396,7 @@ class ModelBuilder:
         if not self.best_checkpoints:
             raise FileNotFoundError("No existen checkpoints registrados en esta corrida.")
 
-        checkpoint_info = (
-            min(self.best_checkpoints, key=lambda info: info["value"])
-            if self.monitor_mode == "min"
-            else max(self.best_checkpoints, key=lambda info: info["value"])
-        )
+        checkpoint_info = min(self.best_checkpoints, key=lambda info: info["value"]) if self.monitor_mode == "min" else max(self.best_checkpoints, key=lambda info: info["value"])
         checkpoint_path = checkpoint_info["path"]
         if not Path(checkpoint_path).is_file():
             raise FileNotFoundError(f"No existe el checkpoint global: {checkpoint_path}")
