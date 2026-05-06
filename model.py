@@ -43,7 +43,8 @@ class ModelBuilder:
         learning_rate=1e-3,
         focal_alpha=0.90,
         focal_gamma=2.0,
-        checkpoint_monitor="val_pr_auc",
+        metric_to_maximize="pr_auc",
+        checkpoint_monitor=None,
         monitor_mode="max",
         early_stopping_patience=6,
         reduce_lr_patience=2,
@@ -69,7 +70,21 @@ class ModelBuilder:
         self.learning_rate = learning_rate
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
-        self.checkpoint_monitor = checkpoint_monitor
+        if checkpoint_monitor is not None:
+            self.checkpoint_monitor = checkpoint_monitor
+            self.metric_to_maximize = (
+                checkpoint_monitor.removeprefix("val_")
+                if checkpoint_monitor.startswith("val_")
+                else checkpoint_monitor
+            )
+        else:
+            m = str(metric_to_maximize)
+            if m.startswith("val_"):
+                self.checkpoint_monitor = m
+                self.metric_to_maximize = m.removeprefix("val_")
+            else:
+                self.metric_to_maximize = m
+                self.checkpoint_monitor = f"val_{m}"
         self.monitor_mode = monitor_mode
         self.early_stopping_patience = early_stopping_patience
         self.reduce_lr_patience = reduce_lr_patience
@@ -406,3 +421,6 @@ class ModelBuilder:
 
     def evaluate(self, test_ds, return_dict=True):
         return self.model.evaluate(test_ds, return_dict=return_dict)
+        
+    def predict(self, test_ds, verbose=1):
+        return self.model.predict(test_ds, verbose=verbose)
