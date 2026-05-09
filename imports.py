@@ -22,4 +22,9 @@ def set_seed(seed: int = 42) -> None:
 
 
 def get_device() -> str:
-    return "GPU" if tf.config.list_physical_devices('GPU') else "CPU"
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        return "CPU"
+    details = tf.config.experimental.get_device_details(gpus[0])
+    name = (details.get("device_name") or "").strip()
+    return f"GPU: {name}" if name else "GPU"
