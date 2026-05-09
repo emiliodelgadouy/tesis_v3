@@ -12,6 +12,40 @@ def _decode_fallback(raw):
     return img
 
 
+# CLAHE no tiene op nativa en TF: se ejecuta en CPU via cv2 dentro de tf.numpy_function.
+# Como es deterministico por imagen, conviene combinarlo con .cache() para amortizar el costo.
+def _clahe_np_uint8(image, clip_limit, tile_grid):
+    import cv2
+
+    arr = np.asarray(image)
+    if arr.ndim == 3 and arr.shape[-1] == 3:
+        gray = cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    else:
+        gray = arr.astype(np.uint8).reshape(arr.shape[0], arr.shape[1])
+    clahe = cv2.createCLAHE(
+        clipLimit=float(clip_limit),
+        tileGridSize=(int(tile_grid), int(tile_grid)),
+    )
+    eq = clahe.apply(gray)
+    return np.repeat(eq[..., None], 3, axis=-1).astype(np.float32)
+
+
+def apply_clahe_tf(img, clip_limit=2.0, tile_grid=8):
+    """CLAHE sobre luminancia, salida RGB en float32 con rango [0, 255].
+
+    Espera entrada HxWx3 en [0, 255] (cualquier dtype). El backbone se encarga
+    despues del preprocess_input correspondiente.
+    """
+    img_u8 = tf.cast(tf.clip_by_value(tf.cast(img, tf.float32), 0.0, 255.0), tf.uint8)
+    out = tf.numpy_function(
+        func=lambda x: _clahe_np_uint8(x, clip_limit, tile_grid),
+        inp=[img_u8],
+        Tout=tf.float32,
+    )
+    out.set_shape([None, None, 3])
+    return out
+
+
 def decode_image(path):
     raw = tf.io.read_file(path)
     lower = tf.strings.lower(path)
@@ -85,6 +119,9 @@ def to_tf_dataset(
     mil_pool_size=None,
     cache_dataset=True,
     cache_filename=None,
+    use_clahe=False,
+    clahe_clip_limit=2.0,
+    clahe_tile_grid=8,
 ):
     """Si mil=True, cada elemento es una bolsa (K, H, W, 3) con la misma etiqueta de imagen.
 
@@ -94,6 +131,9 @@ def to_tf_dataset(
 
     cache_dataset: cache en RAM despues del primer epoch (desactivar si no cabe en memoria).
     cache_filename: ruta opcional para cache en disco (persistente entre corridas); crea el directorio padre.
+
+    use_clahe: aplica CLAHE (en cv2) sobre la luminancia y replica a 3 canales antes de cachear.
+    Como es deterministico por imagen, queda en cache y no penaliza epochs posteriores.
     """
     paths = tf.constant(tbl["path"].values)
     labels = tf.constant(tbl["cls"].values.astype(np.float32))
@@ -118,6 +158,9 @@ def to_tf_dataset(
         def process(path, label):
             img = decode_image(path)
             img = tf.image.resize(img, pool_hw)
+            if use_clahe:
+                img = apply_clahe_tf(img, clahe_clip_limit, clahe_tile_grid)
+                img.set_shape([pool_hw[0], pool_hw[1], 3])
             hpath = tf.strings.to_hash_bucket_fast(path, 2**31 - 1)
             crops = []
             for i in range(mil_k):
@@ -144,6 +187,9 @@ def to_tf_dataset(
         def process(path, label):
             img = decode_image(path)
             img = tf.image.resize(img, IMAGE_SIZE)
+            if use_clahe:
+                img = apply_clahe_tf(img, clahe_clip_limit, clahe_tile_grid)
+                img.set_shape([ph, pw, 3])
             return img, label
 
     ds_tf = ds_tf.map(
