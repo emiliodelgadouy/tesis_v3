@@ -234,11 +234,12 @@ class ModelBuilder:
         return self
 
     def compile(self):
+        # jit_compile suele caer a False en modelos con augment capas custom (warning Keras); evita intentos XLA inútiles.
         self.model.compile(
             optimizer=self.optimizer(),
             loss=self.focal_loss(),
             metrics=self.metrics(),
-            jit_compile=not self.use_mil,
+            jit_compile=False,
         )
         return self
 

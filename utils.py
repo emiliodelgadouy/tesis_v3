@@ -2,7 +2,48 @@ import numpy as np
 import tensorflow as tf
 from sklearn.model_selection import StratifiedGroupKFold
 import time
+from pathlib import Path
 from tensorflow import keras
+
+
+def _decode_fallback(raw):
+    img = tf.image.decode_image(raw, channels=3, expand_animations=False)
+    img.set_shape([None, None, 3])
+    return img
+
+
+def decode_image(path):
+    raw = tf.io.read_file(path)
+    lower = tf.strings.lower(path)
+    is_jpeg = tf.strings.regex_full_match(lower, ".*\\.jpe?g")
+    is_png = tf.strings.regex_full_match(lower, ".*\\.png")
+
+    def _jpeg():
+        img = tf.image.decode_jpeg(raw, channels=3, dct_method="INTEGER_FAST")
+        img.set_shape([None, None, 3])
+        return img
+
+    def _png():
+        img = tf.image.decode_png(raw, channels=3)
+        img.set_shape([None, None, 3])
+        return img
+
+    img = tf.cond(
+        is_jpeg,
+        _jpeg,
+        lambda: tf.cond(is_png, _png, lambda: _decode_fallback(raw)),
+    )
+    img = tf.image.convert_image_dtype(img, tf.float16) * tf.cast(255.0, tf.float16)
+    return img
+
+
+def _dataset_perf_options(ds: tf.data.Dataset) -> tf.data.Dataset:
+    opts = tf.data.Options()
+    if hasattr(opts, "deterministic"):
+        opts.deterministic = False
+    elif hasattr(opts, "experimental_deterministic"):
+        opts.experimental_deterministic = False
+    return ds.with_options(opts)
 
 def stratified_split(
     ds,
@@ -42,12 +83,17 @@ def to_tf_dataset(
     mil=False,
     mil_num_instances=8,
     mil_pool_size=None,
+    cache_dataset=True,
+    cache_filename=None,
 ):
     """Si mil=True, cada elemento es una bolsa (K, H, W, 3) con la misma etiqueta de imagen.
 
     Se reescala la imagen a mil_pool_size (por defecto 2x el parche) y se extraen K parches
     de tamano IMAGE_SIZE. Train usa random_crop; val/test (shuffle=False) usa cortes
     reproducibles por ruta (stateless_random_crop).
+
+    cache_dataset: cache en RAM despues del primer epoch (desactivar si no cabe en memoria).
+    cache_filename: ruta opcional para cache en disco (persistente entre corridas); crea el directorio padre.
     """
     paths = tf.constant(tbl["path"].values)
     labels = tf.constant(tbl["cls"].values.astype(np.float32))
@@ -104,24 +150,23 @@ def to_tf_dataset(
         process,
         num_parallel_calls=tf.data.AUTOTUNE,
     )
-    ds_tf = ds_tf.cache()
+    if cache_filename is not None:
+        Path(cache_filename).parent.mkdir(parents=True, exist_ok=True)
+        ds_tf = ds_tf.cache(cache_filename)
+    elif cache_dataset:
+        ds_tf = ds_tf.cache()
 
     if shuffle:
         ds_tf = ds_tf.shuffle(len(tbl), seed=seed, reshuffle_each_iteration=True)
 
-    return ds_tf.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-
-def decode_image(path):
-    raw = tf.io.read_file(path)
-    img = tf.image.decode_image(raw, channels=3, expand_animations=False)
-    img.set_shape([None, None, 3])
-    img = tf.image.convert_image_dtype(img, tf.float16) * tf.cast(255.0, tf.float16)
-    return img
+    out = ds_tf.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    return _dataset_perf_options(out)
 
 class EpochTimer(keras.callbacks.Callback):
     def on_train_begin(self, logs=None):
         self.epoch_times = []
+        self.total_elapsed_times = []
+        self._fit_start = time.perf_counter()
 
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_start_time = time.perf_counter()
@@ -129,5 +174,8 @@ class EpochTimer(keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         elapsed = time.perf_counter() - self.epoch_start_time
         self.epoch_times.append(elapsed)
+        total = time.perf_counter() - self._fit_start
+        self.total_elapsed_times.append(total)
         if logs is not None:
             logs["epoch_time_seconds"] = elapsed
+            logs["total_elapsed_seconds"] = total
