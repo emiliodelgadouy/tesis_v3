@@ -498,8 +498,10 @@ def build_backbone(
     )
 
 
-def resolve_backbone(backbone_name):
-    backbone = build_backbone(backbone_name)
+def resolve_backbone(backbone_name, input_size: InputSize | None = None):
+    if input_size is None:
+        input_size = get_input_size(backbone_name)
+    height, width = input_size
+    backbone = build_backbone(backbone_name, input_shape=(height, width, 3))
     preprocess_input = get_preprocess_input(backbone_name)
-    input_size = get_input_size(backbone_name)
     return backbone, preprocess_input, input_size
