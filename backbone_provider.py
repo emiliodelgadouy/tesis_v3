@@ -137,21 +137,7 @@ def _ensure_radimagenet_weights() -> Path:
 
     gdown = _import_gdown()
 
-    # 1) Carpeta de Drive (archivos sueltos). En Colab suele fallar sin cookies.
-    print(
-        f"Descargando RadImageNet (carpeta de Google Drive) en {cache_dir} ...\n"
-        "Si no aparecen .h5, se usara el bundle ZIP oficial (~1.8 GB, una sola vez)."
-    )
-    gdown.download_folder(
-        id=RADIMAGENET_FOLDER_ID,
-        output=str(cache_dir),
-        quiet=False,
-        use_cookies=True,
-    )
-    if _list_radimagenet_h5(cache_dir):
-        return cache_dir
-
-    # 2) Reintentar extraccion si ya hay un ZIP parcial/corrupto.
+    # 1) Reintentar extraccion si ya hay un ZIP parcial/corrupto en cache.
     zip_path = cache_dir / RADIMAGENET_BUNDLE_ZIP_NAME
     if zip_path.is_file():
         if zip_path.stat().st_size < MIN_RADIMAGENET_ZIP_BYTES:
@@ -170,25 +156,66 @@ def _ensure_radimagenet_weights() -> Path:
                         pass
                     return cache_dir
 
+    # 2) Carpeta de Drive (archivos sueltos). Historicamente fallaba sin cookies
+    # y desde 2025-2026 la carpeta original devuelve 404, asi que solo se intenta
+    # si el usuario fuerza el modo con RADIMAGENET_TRY_FOLDER=1.
+    if os.environ.get("RADIMAGENET_TRY_FOLDER", "").lower() in {"1", "true", "yes"}:
+        print(
+            f"Intentando descargar RadImageNet (carpeta de Google Drive) en {cache_dir} ...\n"
+            "Si falla, se usara el bundle ZIP oficial (~1.8 GB, una sola vez)."
+        )
+        try:
+            gdown.download_folder(
+                id=RADIMAGENET_FOLDER_ID,
+                output=str(cache_dir),
+                quiet=False,
+                use_cookies=True,
+            )
+        except Exception as exc:  # gdown.exceptions.DownloadError u otros
+            print(
+                f"Aviso: fallo la descarga de la carpeta de Drive ({exc!s}). "
+                "Continuando con el bundle ZIP oficial."
+            )
+        if _list_radimagenet_h5(cache_dir):
+            return cache_dir
+
     # 3) Bundle oficial (contiene RadImageNet_models/*.h5).
     bundle_url = f"https://drive.google.com/uc?id={RADIMAGENET_TF_BUNDLE_ID}"
     print(
         "Descargando el bundle ZIP oficial de RadImageNet (~1.8 GB). "
         "Puede tardar varios minutos; al terminar se borra el ZIP para ahorrar espacio."
     )
-    gdown.download(bundle_url, str(zip_path), quiet=False)
+    try:
+        gdown.download(bundle_url, str(zip_path), quiet=False)
+    except Exception as exc:
+        zip_path.unlink(missing_ok=True)
+        raise FileNotFoundError(
+            "No se pudieron descargar los pesos RadImageNet desde Google Drive "
+            f"({exc!s}).\n"
+            "Opciones:\n"
+            f"  1) Reintentar mas tarde (Drive limita descargas masivas).\n"
+            "  2) Descargar manualmente el ZIP desde "
+            f"https://drive.google.com/file/d/{RADIMAGENET_TF_BUNDLE_ID}/view "
+            f"y copiarlo a {zip_path} antes de reintentar.\n"
+            "  3) Bajar los .h5 individuales (ver https://github.com/BMEII-AI/RadImageNet) "
+            f"y colocarlos bajo {cache_dir} (o setear MEDICAL_WEIGHTS_DIR)."
+        ) from exc
 
     if not zip_path.is_file() or zip_path.stat().st_size < MIN_RADIMAGENET_ZIP_BYTES:
         zip_path.unlink(missing_ok=True)
         raise FileNotFoundError(
-            "No se pudieron obtener los pesos RadImageNet (carpeta vacia y descarga del bundle "
-            "fallida o demasiado pequena, p. ej. aviso HTML de Google Drive).\n"
+            "No se pudieron obtener los pesos RadImageNet: el bundle ZIP descargado "
+            "esta vacio o es demasiado pequeno (probable aviso HTML de Google Drive por "
+            "limite de descargas).\n"
             "Opciones:\n"
-            f"  1) Borrar la carpeta {cache_dir} y reintentar con mejor conexion.\n"
-            "  2) Descargar manualmente los .h5 desde https://github.com/BMEII-AI/RadImageNet "
-            f"y colocarlos bajo {cache_dir} (o define MEDICAL_WEIGHTS_DIR y copia a "
+            f"  1) Borrar {zip_path} y reintentar mas tarde (Drive limita descargas masivas).\n"
+            "  2) Descargar manualmente el ZIP desde "
+            f"https://drive.google.com/file/d/{RADIMAGENET_TF_BUNDLE_ID}/view y copiarlo a "
+            f"{zip_path} antes de reintentar.\n"
+            "  3) Bajar los .h5 individuales desde https://github.com/BMEII-AI/RadImageNet "
+            f"y colocarlos bajo {cache_dir} (o setear MEDICAL_WEIGHTS_DIR y copiar a "
             f"…/radimagenet/).\n"
-            "  3) En Colab, montar Drive y exportar MEDICAL_WEIGHTS_DIR a una ruta persistente."
+            "  4) En Colab, montar Drive y exportar MEDICAL_WEIGHTS_DIR a una ruta persistente."
         )
 
     with zipfile.ZipFile(zip_path) as zf:
