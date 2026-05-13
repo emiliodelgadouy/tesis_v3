@@ -293,34 +293,39 @@ def _build_radimagenet_backbone(
 
     if weights == "radimagenet":
         weights_path = _radimagenet_weights_path(model_key)
-        # Load the full saved model and strip the classification head by finding
-        # the last layer with a spatial (4D) output. This avoids layer-name mismatches
-        # that occur when using load_weights into a freshly instantiated model.
+        # Los .h5 oficiales son archivos *_notop.h5 guardados con Keras 2.4 que
+        # incluyen arquitectura + pesos y ya no tienen cabeza de clasificacion;
+        # el input esta fijado a (None, 224, 224, 3). Cargarlos directamente con
+        # load_model preserva todos los pesos exactamente (incluyendo BN).
         saved = keras.models.load_model(str(weights_path), compile=False)
-        last_spatial_layer = None
-        for layer in reversed(saved.layers):
-            try:
-                out_shape = layer.output_shape
-                if isinstance(out_shape, list):
-                    out_shape = out_shape[0]
-                if len(out_shape) == 4:
-                    last_spatial_layer = layer
-                    break
-            except Exception:
-                continue
-        if last_spatial_layer is None:
-            raise ValueError(
-                f"No se encontro ninguna capa espacial (4D) en el modelo RadImageNet "
-                f"cargado desde {weights_path}. Verifica que el .h5 es correcto."
-            )
-        base_model = keras.Model(
-            inputs=saved.input,
-            outputs=last_spatial_layer.output,
-            name=name,
-        )
+
+        inputs = saved.inputs[0] if saved.inputs else saved.input
+        output_tensor = saved.outputs[0] if saved.outputs else saved.output
+
+        if len(output_tensor.shape) != 4:
+            last_spatial_layer = None
+            for layer in reversed(saved.layers):
+                try:
+                    layer_out = layer.output
+                    if isinstance(layer_out, list):
+                        layer_out = layer_out[0]
+                    if len(layer_out.shape) == 4:
+                        last_spatial_layer = layer
+                        break
+                except Exception:
+                    continue
+            if last_spatial_layer is None:
+                raise ValueError(
+                    f"No se encontro ninguna capa espacial (4D) en el modelo RadImageNet "
+                    f"cargado desde {weights_path}. Verifica que el .h5 es correcto."
+                )
+            output_tensor = last_spatial_layer.output
+
+        base_model = keras.Model(inputs=inputs, outputs=output_tensor, name=name)
         print(
             f"RadImageNet '{model_key}': backbone cargado desde '{weights_path.name}', "
-            f"{len(base_model.layers)} capas, output {last_spatial_layer.output_shape}."
+            f"{len(base_model.layers)} capas, input {tuple(inputs.shape)}, "
+            f"output {tuple(output_tensor.shape)}."
         )
     elif weights == "imagenet":
         base_model = base_model_fn(
@@ -483,14 +488,16 @@ BACKBONES: dict[str, BackboneConfig] = {
         "radimagenet_inceptionv3",
         RadImageNetInceptionV3,
         radimagenet_preprocess_input,
-        (299, 299),
+        # Los pesos oficiales se entrenaron con input 224x224 (no 299x299).
+        (224, 224),
         default_weights="radimagenet",
     ),
     "radimagenetinceptionresnetv2": BackboneConfig(
         "radimagenet_inceptionresnetv2",
         RadImageNetInceptionResNetV2,
         radimagenet_preprocess_input,
-        (299, 299),
+        # Los pesos oficiales se entrenaron con input 224x224 (no 299x299).
+        (224, 224),
         default_weights="radimagenet",
     ),
     "chexnet": BackboneConfig(
