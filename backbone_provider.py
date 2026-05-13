@@ -266,35 +266,35 @@ def _build_radimagenet_backbone(
 
     if weights == "radimagenet":
         weights_path = _radimagenet_weights_path(model_key)
-        base_model = base_model_fn(
-            weights=None, include_top=False, input_shape=input_shape, **kwargs
-        )
-        # RadImageNet .h5 files are full model saves (architecture + weights).
-        # Loading with load_model then transferring by name is safer than load_weights,
-        # which silently skips mismatched layers when the saved model has a different head.
-        try:
-            saved = keras.models.load_model(str(weights_path), compile=False)
-            transferred, skipped = 0, 0
-            for layer in base_model.layers:
-                try:
-                    w = saved.get_layer(layer.name).get_weights()
-                    if w:
-                        layer.set_weights(w)
-                        transferred += 1
-                except (ValueError, KeyError):
-                    skipped += 1
-            print(
-                f"RadImageNet '{model_key}': {transferred} capas cargadas, "
-                f"{skipped} capas sin match (esperado si el .h5 no tiene cabeza)."
+        # Load the full saved model and strip the classification head by finding
+        # the last layer with a spatial (4D) output. This avoids layer-name mismatches
+        # that occur when using load_weights into a freshly instantiated model.
+        saved = keras.models.load_model(str(weights_path), compile=False)
+        last_spatial_layer = None
+        for layer in reversed(saved.layers):
+            try:
+                out_shape = layer.output_shape
+                if isinstance(out_shape, list):
+                    out_shape = out_shape[0]
+                if len(out_shape) == 4:
+                    last_spatial_layer = layer
+                    break
+            except Exception:
+                continue
+        if last_spatial_layer is None:
+            raise ValueError(
+                f"No se encontro ninguna capa espacial (4D) en el modelo RadImageNet "
+                f"cargado desde {weights_path}. Verifica que el .h5 es correcto."
             )
-            if transferred == 0:
-                print(
-                    "ADVERTENCIA: 0 capas transferidas. Revisa que el archivo .h5 "
-                    f"corresponde a '{model_key}' y que fue guardado con model.save()."
-                )
-        except Exception:
-            # Fallback: el .h5 es weights-only (guardado con save_weights), carga directo.
-            base_model.load_weights(str(weights_path))
+        base_model = keras.Model(
+            inputs=saved.input,
+            outputs=last_spatial_layer.output,
+            name=name,
+        )
+        print(
+            f"RadImageNet '{model_key}': backbone cargado desde '{weights_path.name}', "
+            f"{len(base_model.layers)} capas, output {last_spatial_layer.output_shape}."
+        )
     elif weights == "imagenet":
         base_model = base_model_fn(
             weights="imagenet", include_top=False, input_shape=input_shape, **kwargs
