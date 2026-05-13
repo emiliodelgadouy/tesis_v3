@@ -265,11 +265,36 @@ def _build_radimagenet_backbone(
         )
 
     if weights == "radimagenet":
+        weights_path = _radimagenet_weights_path(model_key)
         base_model = base_model_fn(
             weights=None, include_top=False, input_shape=input_shape, **kwargs
         )
-        weights_path = _radimagenet_weights_path(model_key)
-        base_model.load_weights(str(weights_path))
+        # RadImageNet .h5 files are full model saves (architecture + weights).
+        # Loading with load_model then transferring by name is safer than load_weights,
+        # which silently skips mismatched layers when the saved model has a different head.
+        try:
+            saved = keras.models.load_model(str(weights_path), compile=False)
+            transferred, skipped = 0, 0
+            for layer in base_model.layers:
+                try:
+                    w = saved.get_layer(layer.name).get_weights()
+                    if w:
+                        layer.set_weights(w)
+                        transferred += 1
+                except (ValueError, KeyError):
+                    skipped += 1
+            print(
+                f"RadImageNet '{model_key}': {transferred} capas cargadas, "
+                f"{skipped} capas sin match (esperado si el .h5 no tiene cabeza)."
+            )
+            if transferred == 0:
+                print(
+                    "ADVERTENCIA: 0 capas transferidas. Revisa que el archivo .h5 "
+                    f"corresponde a '{model_key}' y que fue guardado con model.save()."
+                )
+        except Exception:
+            # Fallback: el .h5 es weights-only (guardado con save_weights), carga directo.
+            base_model.load_weights(str(weights_path))
     elif weights == "imagenet":
         base_model = base_model_fn(
             weights="imagenet", include_top=False, input_shape=input_shape, **kwargs
