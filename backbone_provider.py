@@ -160,10 +160,6 @@ def _ensure_radimagenet_weights() -> Path:
     # y desde 2025-2026 la carpeta original devuelve 404, asi que solo se intenta
     # si el usuario fuerza el modo con RADIMAGENET_TRY_FOLDER=1.
     if os.environ.get("RADIMAGENET_TRY_FOLDER", "").lower() in {"1", "true", "yes"}:
-        print(
-            f"Intentando descargar RadImageNet (carpeta de Google Drive) en {cache_dir} ...\n"
-            "Si falla, se usara el bundle ZIP oficial (~1.8 GB, una sola vez)."
-        )
         try:
             gdown.download_folder(
                 id=RADIMAGENET_FOLDER_ID,
@@ -181,10 +177,6 @@ def _ensure_radimagenet_weights() -> Path:
 
     # 3) Bundle oficial (contiene RadImageNet_models/*.h5).
     bundle_url = f"https://drive.google.com/uc?id={RADIMAGENET_TF_BUNDLE_ID}"
-    print(
-        "Descargando el bundle ZIP oficial de RadImageNet (~1.8 GB). "
-        "Puede tardar varios minutos; al terminar se borra el ZIP para ahorrar espacio."
-    )
     try:
         gdown.download(bundle_url, str(zip_path), quiet=False)
     except Exception as exc:
@@ -257,7 +249,6 @@ def _ensure_chexnet_weights() -> Path:
         return weights_path
 
     gdown = _import_gdown()
-    print(f"Descargando pesos de CheXNet a {weights_path} (~30 MB) ...")
     gdown.download(
         id=CHEXNET_FILE_ID,
         output=str(weights_path),
@@ -322,11 +313,6 @@ def _build_radimagenet_backbone(
             output_tensor = last_spatial_layer.output
 
         base_model = keras.Model(inputs=inputs, outputs=output_tensor, name=name)
-        print(
-            f"RadImageNet '{model_key}': backbone cargado desde '{weights_path.name}', "
-            f"{len(base_model.layers)} capas, input {tuple(inputs.shape)}, "
-            f"output {tuple(output_tensor.shape)}."
-        )
     elif weights == "imagenet":
         base_model = base_model_fn(
             weights="imagenet", include_top=False, input_shape=input_shape, **kwargs

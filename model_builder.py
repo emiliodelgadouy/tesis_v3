@@ -4,31 +4,8 @@ from tensorflow import keras
 from tensorflow.keras import layers
 import tensorflow as tf
 
+from src.dataset_provider import as_tf_dataset
 from src.utils import EpochTimer
-
-
-class MilAttentionPoolLayer(layers.Layer):
-    """Instancias (B, K, D) -> embedding de bolsa (B, D) con atencion tipo Ilse et al."""
-
-    def __init__(self, attention_dim: int, **kwargs):
-        kwargs.setdefault("dtype", "float32")
-        super().__init__(**kwargs)
-        self.attention_dim = int(attention_dim)
-        self.dense_v = layers.Dense(
-            self.attention_dim,
-            activation="tanh",
-            dtype="float32",
-            name="mil_attn_v",
-        )
-        self.dense_u = layers.Dense(1, dtype="float32", name="mil_attn_u")
-        self.softmax = layers.Softmax(axis=1, name="mil_attn_softmax")
-
-    def call(self, inputs):
-        x = keras.ops.cast(inputs, "float32")
-        h = self.dense_v(x)
-        scores = self.dense_u(h)
-        w = keras.ops.cast(self.softmax(scores), "float32")
-        return keras.ops.sum(x * w, axis=1)
 
 
 class ModelBuilder:
@@ -50,9 +27,6 @@ class ModelBuilder:
         reduce_lr_patience=4,
         reduce_lr_factor=0.5,
         min_lr=1e-7,
-        use_mil=False,
-        mil_num_instances=8,
-        mil_attention_dim=128,
         aggressive_augmentation=False,
         initial_bias=None,
     ):
@@ -61,9 +35,6 @@ class ModelBuilder:
         self.preprocess_input = preprocess_input
         self.backbone.trainable = backbone_trainable
         self.input_shape = backbone.input_shape[1:3]
-        self.use_mil = use_mil
-        self.mil_num_instances = int(mil_num_instances)
-        self.mil_attention_dim = int(mil_attention_dim)
         self.aggressive_augmentation = bool(aggressive_augmentation)
         self.top_dense = top_dense
         self.dropout = dropout
@@ -149,9 +120,6 @@ class ModelBuilder:
         return self.augmentation_seq()(x)
 
     def inputs(self):
-        if self.use_mil:
-            k, h, w = self.mil_num_instances, self.IMG_SIZE[0], self.IMG_SIZE[1]
-            return keras.Input(shape=(k, h, w, 3), name="bag")
         return keras.Input(shape=(self.IMG_SIZE[0], self.IMG_SIZE[1], 3), name="image")
 
     def output(self, x):
@@ -244,33 +212,14 @@ class ModelBuilder:
         return self
 
     def build(self):
-        if self.use_mil and self.mil_num_instances < 1:
-            raise ValueError("mil_num_instances debe ser >= 1 cuando use_mil=True")
         inputs = self.inputs()
-        if self.use_mil:
-            x = layers.TimeDistributed(self.augmentation_seq(), name="td_augment")(inputs)
-            x = layers.TimeDistributed(
-                layers.Lambda(self.preprocess_input, name="preprocess_input_td"),
-                name="td_preprocess",
-            )(x)
-            x = layers.TimeDistributed(self.backbone, name="td_backbone")(x)
-            x = layers.TimeDistributed(
-                layers.GlobalAveragePooling2D(name="gap"),
-                name="td_gap",
-            )(x)
-            x = MilAttentionPoolLayer(self.mil_attention_dim, name="mil_bag_pool")(x)
-            x = self.top_mlp(x)
-            outputs = self.output(x)
-            model_name = "mil_bag_classifier"
-        else:
-            # x = self.resize(inputs)
-            x = self.augmentation(inputs)
-            x = self.preprocess(x)
-            x = self.backbone(x)
-            x = self.head(x)
-            outputs = self.output(x)
-            model_name = "simple_validation_vgg"
-        self.model = keras.Model(inputs, outputs, name=model_name)
+        # x = self.resize(inputs)
+        x = self.augmentation(inputs)
+        x = self.preprocess(x)
+        x = self.backbone(x)
+        x = self.head(x)
+        outputs = self.output(x)
+        self.model = keras.Model(inputs, outputs, name="simple_validation_vgg")
         self.compile()
         return self
 
@@ -378,8 +327,8 @@ class ModelBuilder:
         self.checkpoint_path = self.checkpoint_dir / f"stage_{self.fit_number}.weights.h5"
         callbacks = self.callbacks() + list(callbacks or [])
         return self.model.fit(
-            train_ds,
-            validation_data=val_ds,
+            as_tf_dataset(train_ds),
+            validation_data=as_tf_dataset(val_ds),
             epochs=epochs,
             callbacks=callbacks,
         )
@@ -421,7 +370,7 @@ class ModelBuilder:
         return checkpoint_info
 
     def evaluate(self, test_ds, return_dict=True):
-        return self.model.evaluate(test_ds, return_dict=return_dict)
-        
+        return self.model.evaluate(as_tf_dataset(test_ds), return_dict=return_dict)
+
     def predict(self, test_ds, verbose=1):
-        return self.model.predict(test_ds, verbose=verbose)
+        return self.model.predict(as_tf_dataset(test_ds), verbose=verbose)

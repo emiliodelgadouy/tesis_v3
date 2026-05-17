@@ -2,10 +2,10 @@ import importlib
 import subprocess
 import sys
 import os
-import os
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
 from pathlib import Path
-
 
 def is_running_in_colab() -> bool:
     try:
@@ -54,8 +54,6 @@ def configure_notebook(
     install_requirements: bool = True,
     skip_requirements_in_colab: bool = True,
 ) -> None:
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-    os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
     os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
     os.environ["TF_GPU_THREAD_COUNT"] = "2"
     if disable_bytecode:
