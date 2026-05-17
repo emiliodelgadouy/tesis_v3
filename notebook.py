@@ -47,6 +47,24 @@ def install_requirements_silent(requirements_path: str = "requirements.txt") -> 
         )
 
 
+def _ensure_imp_compat() -> None:
+    """IPython autoreload still imports `imp`, removed in Python 3.12."""
+    if "imp" in sys.modules:
+        return
+
+    import types
+
+    imp = types.ModuleType("imp")
+    imp.reload = importlib.reload
+    sys.modules["imp"] = imp
+
+
+def _enable_autoreload(shell) -> None:
+    _ensure_imp_compat()
+    shell.run_line_magic("load_ext", "autoreload")
+    shell.run_line_magic("autoreload", "2")
+
+
 def configure_notebook(
     autoreload: bool = True,
     disable_bytecode: bool = True,
@@ -78,5 +96,7 @@ def configure_notebook(
     if shell is None:
         return
 
-    shell.run_line_magic("load_ext", "autoreload")
-    shell.run_line_magic("autoreload", "2")
+    try:
+        _enable_autoreload(shell)
+    except Exception as exc:
+        print(f"Warning: autoreload disabled ({exc})")
