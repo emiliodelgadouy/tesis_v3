@@ -3,7 +3,10 @@ from __future__ import annotations
 import time
 from typing import Literal
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_curve
 from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
@@ -13,9 +16,15 @@ from src.dataset_provider import apply_clahe_tf, decode_image
 __all__ = [
     "EpochTimer",
     "apply_clahe_tf",
+    "apply_probability_threshold",
     "decode_image",
     "deduplicate_images",
+    "labels_from_tf_dataset",
+    "logit_initial_bias",
+    "plot_binary_confusion_matrix",
+    "predict_probabilities",
     "stratified_split",
+    "threshold_max_recall",
 ]
 
 
@@ -115,6 +124,58 @@ def stratified_split(
     tbl_train = tbl_training_full.iloc[train_idx].reset_index(drop=True)
     tbl_val = tbl_training_full.iloc[val_idx].reset_index(drop=True)
     return tbl_train, tbl_val, tbl_test
+
+
+def logit_initial_bias(n_positive: int, n_negative: int) -> float:
+    return float(np.log(n_positive / n_negative))
+
+
+def _sigmoid(z) -> np.ndarray:
+    z = np.asarray(z, dtype=np.float64)
+    return np.where(z >= 0, 1 / (1 + np.exp(-z)), np.exp(z) / (1 + np.exp(z)))
+
+
+def labels_from_tf_dataset(dataset) -> np.ndarray:
+    return np.concatenate(
+        [np.asarray(yb, dtype=np.int64).reshape(-1) for _, yb in dataset]
+    )
+
+
+def predict_probabilities(model, dataset, *, verbose: int = 1) -> np.ndarray:
+    logits = model.predict(dataset, verbose=verbose).astype(np.float64).reshape(-1)
+    return _sigmoid(logits)
+
+
+def apply_probability_threshold(y_prob, threshold: float) -> np.ndarray:
+    return (y_prob >= threshold).astype(np.int64)
+
+
+def plot_binary_confusion_matrix(
+    y_true,
+    y_pred,
+    *,
+    title: str,
+    display_labels: tuple[str, str] = ("Neg", "Pos"),
+    figsize: tuple[float, float] = (5, 4),
+) -> None:
+    fig, ax = plt.subplots(figsize=figsize)
+    ConfusionMatrixDisplay(
+        confusion_matrix(y_true, y_pred, labels=[0, 1]),
+        display_labels=list(display_labels),
+    ).plot(ax=ax, colorbar=False)
+    ax.set_title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def threshold_max_recall(y_true, y_prob) -> tuple[float, float]:
+    """Umbral que maximiza recall en validación (desempate por precisión)."""
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
+    recalls_t, precisions_t = recalls[:-1], precisions[:-1]
+    max_recall = float(recalls_t.max())
+    candidate_idx = np.flatnonzero(recalls_t == max_recall)
+    best_i = int(candidate_idx[np.argmax(precisions_t[candidate_idx])])
+    return float(thresholds[best_i]), max_recall
 
 
 class EpochTimer(keras.callbacks.Callback):

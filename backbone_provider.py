@@ -425,7 +425,7 @@ def CheXNetDenseNet121(
 # Registry
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass
 class BackboneConfig:
     name: str
     model_fn: ModelFactory

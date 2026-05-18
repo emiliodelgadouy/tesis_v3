@@ -61,7 +61,8 @@ def _ensure_imp_compat() -> None:
 
 def _enable_autoreload(shell) -> None:
     _ensure_imp_compat()
-    shell.run_line_magic("load_ext", "autoreload")
+    if "autoreload" not in shell.extension_manager.loaded:
+        shell.run_line_magic("load_ext", "autoreload")
     shell.run_line_magic("autoreload", "2")
 
 
@@ -71,11 +72,17 @@ def configure_notebook(
     requirements_path: str = "src/requirements.txt",
     install_requirements: bool = True,
     skip_requirements_in_colab: bool = True,
+    mixed_precision_policy: str | None = "mixed_float16",
 ) -> None:
     os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
     os.environ["TF_GPU_THREAD_COUNT"] = "2"
     if disable_bytecode:
         sys.dont_write_bytecode = True
+
+    if mixed_precision_policy is not None:
+        from tensorflow.keras import mixed_precision
+
+        mixed_precision.set_global_policy(mixed_precision_policy)
 
     running_in_colab = is_running_in_colab()
 
