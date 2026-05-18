@@ -131,6 +131,8 @@ class TfDatasetConfig:
     use_clahe: bool = False
     clahe_clip_limit: float = 2.0
     clahe_tile_grid: int = 8
+    lateralize: bool = False
+    laterality_column: str = "laterality"
 
 
 class InspectDataset:
@@ -215,6 +217,7 @@ class InspectDataset:
             "positivo_pct": 100.0 * counts["positivos"] / counts["total"],
             "image_values": img_stats,
             "use_clahe": self.config.use_clahe,
+            "lateralize": self.config.lateralize,
         }
 
         print(f"--- {self.name} ---")
@@ -341,8 +344,19 @@ class DatasetProvider:
         self.config = config
         self._height, self._width = int(config.image_size[0]), int(config.image_size[1])
 
-    def _process(self, path: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+    def _process(
+        self,
+        path: tf.Tensor,
+        label: tf.Tensor,
+        flip_lateral: tf.Tensor | None = None,
+    ) -> tuple[tf.Tensor, tf.Tensor]:
         img = decode_image(path)
+        if flip_lateral is not None:
+            img = tf.cond(
+                flip_lateral,
+                lambda: tf.image.flip_left_right(img),
+                lambda: img,
+            )
         img = tf.image.resize(img, self.config.image_size)
         if self.config.use_clahe:
             img = apply_clahe_tf(
@@ -356,7 +370,14 @@ class DatasetProvider:
     def _base_dataset(self, tbl: pd.DataFrame) -> tf.data.Dataset:
         paths = tf.constant(tbl[self.config.path_column].values)
         labels = tf.constant(tbl[self.config.label_column].values.astype(np.float32))
-        return tf.data.Dataset.from_tensor_slices((paths, labels))
+        if not self.config.lateralize:
+            return tf.data.Dataset.from_tensor_slices((paths, labels))
+
+        flip_lateral = tf.constant(
+            tbl[self.config.laterality_column].astype(str).values == "L",
+            dtype=tf.bool,
+        )
+        return tf.data.Dataset.from_tensor_slices((paths, labels, flip_lateral))
 
     def _wrap(
         self,
@@ -375,8 +396,15 @@ class DatasetProvider:
         )
 
     def build(self, tbl: pd.DataFrame, *, shuffle: bool, name: str = "dataset") -> InspectDataset:
+        if self.config.lateralize:
+            process_fn = lambda path, label, flip: self._process(
+                path, label, flip_lateral=flip
+            )
+        else:
+            process_fn = self._process
+
         ds = self._base_dataset(tbl).map(
-            self._process,
+            process_fn,
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
@@ -441,6 +469,8 @@ def build_dataset_provider(
     use_clahe: bool = False,
     clahe_clip_limit: float = 2.0,
     clahe_tile_grid: int = 8,
+    lateralize: bool = False,
+    laterality_column: str = "laterality",
 ) -> DatasetProvider:
     config = TfDatasetConfig(
         image_size=image_size,
@@ -453,5 +483,7 @@ def build_dataset_provider(
         use_clahe=use_clahe,
         clahe_clip_limit=clahe_clip_limit,
         clahe_tile_grid=clahe_tile_grid,
+        lateralize=lateralize,
+        laterality_column=laterality_column,
     )
     return DatasetProvider(config)
