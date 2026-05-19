@@ -620,22 +620,18 @@ def _offsets_avoiding_roi(
     """Muestrea offsets de parche que no intersectan la ROI (rejection sampling)."""
     max_y_i = tf.maximum(max_y, 0)
     max_x_i = tf.maximum(max_x, 0)
-    max_y_f = tf.cast(max_y_i, tf.float32) + 1.0
-    max_x_f = tf.cast(max_x_i, tf.float32) + 1.0
     n = max_attempts
 
     if random_patch:
-        y0_cand = tf.random.uniform([n], maxval=max_y_f)
-        x0_cand = tf.random.uniform([n], maxval=max_x_f)
+        # Enteros en [0, max_*_i]; evitar uniform+round con maxval=max+1 (puede dar max+1).
+        y0_cand_i = tf.random.uniform([n], maxval=max_y_i + 1, dtype=tf.int32)
+        x0_cand_i = tf.random.uniform([n], maxval=max_x_i + 1, dtype=tf.int32)
     else:
         bucket = tf.cast(tf.strings.to_hash_bucket_fast(path, 2**31 - 1), tf.int32)
         idx = tf.cast(tf.range(n), tf.int32)
         seeds = bucket + idx * 9973
-        y0_cand = tf.cast(seeds % tf.maximum(max_y_i + 1, 1), tf.float32)
-        x0_cand = tf.cast((seeds // 17) % tf.maximum(max_x_i + 1, 1), tf.float32)
-
-    y0_cand_i = tf.cast(tf.round(y0_cand), tf.int32)
-    x0_cand_i = tf.cast(tf.round(x0_cand), tf.int32)
+        y0_cand_i = seeds % tf.maximum(max_y_i + 1, 1)
+        x0_cand_i = (seeds // 17) % tf.maximum(max_x_i + 1, 1)
     xmin, ymin, xmax, ymax = _roi_box_pixels(roi_xmin, roi_ymin, roi_xmax, roi_ymax, h, w)
 
     y0f = tf.cast(y0_cand_i, tf.float32)
@@ -1515,6 +1511,8 @@ class DatasetProvider:
                 )
 
             y0, x0 = tf.cond(is_positive, _positive_offsets, _negative_offsets)
+        y0 = tf.minimum(y0, max_y)
+        x0 = tf.minimum(x0, max_x)
         img = tf.image.crop_to_bounding_box(img, y0, x0, ph, pw)
         img.set_shape([ph, pw, 3])
         if self.config.return_crop_offset:
