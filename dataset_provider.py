@@ -557,7 +557,7 @@ def _roi_is_valid(
         tf.less(roi_xmin, roi_xmax),
         tf.logical_and(
             tf.less(roi_ymin, roi_ymax),
-            tf.math.is_finite(roi_xmin),
+            tf.math.is_finite(roi_xmin + roi_ymin + roi_xmax + roi_ymax),
         ),
     )
 
