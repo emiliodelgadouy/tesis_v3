@@ -727,47 +727,25 @@ def _offset_from_center(
 
 
 def _labels_positive_mask(labels: tf.Tensor) -> tf.Tensor:
-    """Mascara de positivos: binaria (>=0.5) o multilabel (cualquier canal >=0.5)."""
+    """Mascara de positivos: binaria (>=0.5) o multilabel (cualquier canal >=0.5).
+
+    Asume primer eje = batch (como en ``dataset.batch``).
+    """
     labels = tf.cast(labels, tf.float32)
-    rank = tf.rank(labels)
-
-    def _rank0() -> tf.Tensor:
-        return tf.fill([1], labels >= 0.5)
-
-    def _rank1() -> tf.Tensor:
-        return labels >= 0.5
-
-    def _rank2plus() -> tf.Tensor:
-        return tf.reduce_any(labels >= 0.5, axis=-1)
-
-    return tf.cond(
-        tf.less_equal(rank, 0),
-        _rank0,
-        lambda: tf.cond(tf.equal(rank, 1), _rank1, _rank2plus),
-    )
+    batch_size = tf.shape(labels)[0]
+    flat = tf.reshape(labels, [batch_size, -1])
+    return tf.reduce_any(flat >= 0.5, axis=1)
 
 
 def _expand_mixup_lambda(lam: tf.Tensor, target: tf.Tensor) -> tf.Tensor:
     """Expande lambda [B] al rank de `target` (imagen o etiqueta)."""
     lam = tf.reshape(lam, [-1])
     target_rank = tf.rank(target)
-
-    def _rank1() -> tf.Tensor:
-        return lam
-
-    def _rank2() -> tf.Tensor:
-        return lam[:, tf.newaxis]
-
-    def _rank3plus() -> tf.Tensor:
-        extra = target_rank - 1
-        shape = tf.concat([[tf.shape(lam)[0]], tf.ones([extra], dtype=tf.int32)], axis=0)
-        return tf.reshape(lam, shape)
-
-    return tf.cond(
-        tf.equal(target_rank, 1),
-        _rank1,
-        lambda: tf.cond(tf.equal(target_rank, 2), _rank2, _rank3plus),
+    broadcast_shape = tf.concat(
+        [[tf.shape(lam)[0]], tf.ones([target_rank - 1], dtype=tf.int32)],
+        axis=0,
     )
+    return tf.reshape(lam, broadcast_shape)
 
 
 def positive_only_mixup_batch(
@@ -781,80 +759,53 @@ def positive_only_mixup_batch(
 
     Pensado para ejecutarse en ``tf.data`` despues del ``map`` con flip/crop
     y antes de augmentaciones fotometricas/geometricas del modelo.
+    Sin ``tf.cond`` (compatible con Autograph en ``tf.data.map``).
     """
     images_f32 = tf.cast(images, tf.float32)
     labels_f32 = tf.cast(labels, tf.float32)
     batch_size = tf.shape(images_f32)[0]
     pos_mask = _labels_positive_mask(labels_f32)
-
-    def _no_mix() -> tuple[tf.Tensor, tf.Tensor]:
-        return images_f32, labels_f32
-
-    def _maybe_mix() -> tuple[tf.Tensor, tf.Tensor]:
-        n_pos = tf.reduce_sum(tf.cast(pos_mask, tf.int32))
-
-        def _too_few() -> tuple[tf.Tensor, tf.Tensor]:
-            return images_f32, labels_f32
-
-        def _apply() -> tuple[tf.Tensor, tf.Tensor]:
-            pos_indices = tf.boolean_mask(tf.range(batch_size), pos_mask)
-            n = tf.shape(pos_indices)[0]
-            order = tf.random.shuffle(tf.range(n))
-            partner_order = tf.math.floormod(order + 1, n)
-            partners = tf.gather(pos_indices, partner_order)
-            partner_at = tf.tensor_scatter_nd_update(
-                tf.range(batch_size),
-                tf.expand_dims(pos_indices, axis=1),
-                partners,
-            )
-
-            lam_a = tf.random.gamma([batch_size], alpha, beta=1.0, dtype=tf.float32)
-            lam_b = tf.random.gamma([batch_size], alpha, beta=1.0, dtype=tf.float32)
-            lam = lam_a / (lam_a + lam_b + 1e-8)
-
-            partner_images = tf.gather(images_f32, partner_at)
-            partner_labels = tf.gather(labels_f32, partner_at)
-
-            lam_img = _expand_mixup_lambda(lam, images_f32)
-            lam_lbl = _expand_mixup_lambda(lam, labels_f32)
-            mixed_images = lam_img * images_f32 + (1.0 - lam_img) * partner_images
-            mixed_labels = lam_lbl * labels_f32 + (1.0 - lam_lbl) * partner_labels
-
-            pos_mask_f = tf.cast(pos_mask, tf.float32)
-            pos_mask_img = _expand_mixup_lambda(pos_mask_f, images_f32)
-            pos_mask_lbl = _expand_mixup_lambda(pos_mask_f, labels_f32)
-            out_images = pos_mask_img * mixed_images + (1.0 - pos_mask_img) * images_f32
-            out_labels = pos_mask_lbl * mixed_labels + (1.0 - pos_mask_lbl) * labels_f32
-            return out_images, out_labels
-
-        return tf.cond(tf.less(n_pos, 2), _too_few, _apply)
-
-    return tf.cond(tf.less(tf.random.uniform([], dtype=tf.float32), probability), _maybe_mix, _no_mix)
-
-
-def _apply_positive_mixup_to_batch(
-    batch: tuple[tf.Tensor, ...],
-    *,
-    alpha: float,
-    probability: float,
-) -> tuple[tf.Tensor, ...]:
-    if len(batch) == 2:
-        images, labels = batch
-        images, labels = positive_only_mixup_batch(
-            images,
-            labels,
-            alpha=alpha,
-            probability=probability,
-        )
-        return images, labels
-    images, labels, y0, x0, crop_h, crop_w = batch
-    images, labels = positive_only_mixup_batch(
-        images,
-        labels,
-        alpha=alpha,
-        probability=probability,
+    n_pos = tf.reduce_sum(tf.cast(pos_mask, tf.int32))
+    mix_gate = tf.cast(
+        tf.logical_and(
+            tf.less(tf.random.uniform([], dtype=tf.float32), probability),
+            tf.greater_equal(n_pos, 2),
+        ),
+        tf.float32,
     )
-    return images, labels, y0, x0, crop_h, crop_w
+
+    pos_indices = tf.boolean_mask(tf.range(batch_size), pos_mask)
+    n = tf.shape(pos_indices)[0]
+    order = tf.random.shuffle(tf.range(n))
+    partner_order = tf.math.floormod(order + 1, tf.maximum(n, 1))
+    partners = tf.gather(pos_indices, partner_order)
+    partner_at = tf.tensor_scatter_nd_update(
+        tf.range(batch_size),
+        tf.expand_dims(pos_indices, axis=1),
+        partners,
+    )
+
+    lam_a = tf.random.gamma([batch_size], alpha, beta=1.0, dtype=tf.float32)
+    lam_b = tf.random.gamma([batch_size], alpha, beta=1.0, dtype=tf.float32)
+    lam = lam_a / (lam_a + lam_b + 1e-8)
+
+    partner_images = tf.gather(images_f32, partner_at)
+    partner_labels = tf.gather(labels_f32, partner_at)
+
+    lam_img = _expand_mixup_lambda(lam, images_f32)
+    lam_lbl = _expand_mixup_lambda(lam, labels_f32)
+    mixed_images = lam_img * images_f32 + (1.0 - lam_img) * partner_images
+    mixed_labels = lam_lbl * labels_f32 + (1.0 - lam_lbl) * partner_labels
+
+    pos_mask_f = tf.cast(pos_mask, tf.float32)
+    pos_mask_img = _expand_mixup_lambda(pos_mask_f, images_f32)
+    pos_mask_lbl = _expand_mixup_lambda(pos_mask_f, labels_f32)
+    mixed_images = pos_mask_img * mixed_images + (1.0 - pos_mask_img) * images_f32
+    mixed_labels = pos_mask_lbl * mixed_labels + (1.0 - pos_mask_lbl) * labels_f32
+
+    out_images = (1.0 - mix_gate) * images_f32 + mix_gate * mixed_images
+    out_labels = (1.0 - mix_gate) * labels_f32 + mix_gate * mixed_labels
+    return out_images, out_labels
 
 
 def _dataset_perf_options(ds: tf.data.Dataset) -> tf.data.Dataset:
@@ -1887,14 +1838,38 @@ class DatasetProvider:
             alpha = float(self.config.positive_mixup_alpha)
             probability = float(self.config.positive_mixup_probability)
 
-            def _mixup_map(*batch: tf.Tensor) -> tuple[tf.Tensor, ...]:
-                return _apply_positive_mixup_to_batch(
-                    batch,
-                    alpha=alpha,
-                    probability=probability,
-                )
+            if self.config.return_crop_offset:
 
-            batched = batched.map(_mixup_map, num_parallel_calls=tf.data.AUTOTUNE)
+                def _mixup_map_with_crop(
+                    images: tf.Tensor,
+                    labels: tf.Tensor,
+                    y0: tf.Tensor,
+                    x0: tf.Tensor,
+                    crop_h: tf.Tensor,
+                    crop_w: tf.Tensor,
+                ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+                    images, labels = positive_only_mixup_batch(
+                        images,
+                        labels,
+                        alpha=alpha,
+                        probability=probability,
+                    )
+                    return images, labels, y0, x0, crop_h, crop_w
+
+                mixup_fn = _mixup_map_with_crop
+            else:
+
+                def _mixup_map(images: tf.Tensor, labels: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+                    return positive_only_mixup_batch(
+                        images,
+                        labels,
+                        alpha=alpha,
+                        probability=probability,
+                    )
+
+                mixup_fn = _mixup_map
+
+            batched = batched.map(mixup_fn, num_parallel_calls=tf.data.AUTOTUNE)
             batched = _dataset_perf_options(batched.prefetch(tf.data.AUTOTUNE))
 
         return self._wrap(
