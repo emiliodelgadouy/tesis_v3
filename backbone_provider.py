@@ -71,29 +71,77 @@ def CustomTinyBackbone(
     return keras.Model(inputs, x, name=name)
 
 
-def _conv_block(
+def _conv_bn_relu(
+    x,
+    filters: int,
+    kernel_size: int,
+    *,
+    strides: int = 1,
+    name: str,
+) -> keras.KerasTensor:
+    x = layers.Conv2D(
+        filters,
+        kernel_size,
+        strides=strides,
+        padding="same",
+        use_bias=False,
+        name=f"{name}_conv",
+    )(x)
+    x = layers.BatchNormalization(name=f"{name}_bn")(x)
+    x = layers.Activation("relu", name=f"{name}_relu")(x)
+    return x
+
+
+def _residual_block(
     x,
     filters: int,
     name: str,
     *,
-    pool: bool = True,
-    dropout: float = 0.25,
+    strides: int = 1,
+    dropout: float = 0.0,
 ) -> keras.KerasTensor:
-    """Dos conv 3x3 + BN + ReLU; pooling y dropout opcionales."""
+    shortcut = x
+
+    x = _conv_bn_relu(x, filters, 3, strides=strides, name=f"{name}_a")
     x = layers.Conv2D(
-        filters, 3, padding="same", use_bias=False, name=f"{name}_conv_a"
+        filters, 3, padding="same", use_bias=False, name=f"{name}_b_conv"
     )(x)
-    x = layers.BatchNormalization(name=f"{name}_bn_a")(x)
-    x = layers.Activation("relu", name=f"{name}_relu_a")(x)
-    x = layers.Conv2D(
-        filters, 3, padding="same", use_bias=False, name=f"{name}_conv_b"
-    )(x)
-    x = layers.BatchNormalization(name=f"{name}_bn_b")(x)
-    x = layers.Activation("relu", name=f"{name}_relu_b")(x)
-    if pool:
-        x = layers.MaxPooling2D(2, name=f"{name}_pool")(x)
+    x = layers.BatchNormalization(name=f"{name}_b_bn")(x)
+
+    if strides != 1 or shortcut.shape[-1] != filters:
+        shortcut = layers.Conv2D(
+            filters,
+            1,
+            strides=strides,
+            padding="same",
+            use_bias=False,
+            name=f"{name}_proj_conv",
+        )(shortcut)
+        shortcut = layers.BatchNormalization(name=f"{name}_proj_bn")(shortcut)
+
+    x = layers.Add(name=f"{name}_add")([x, shortcut])
+    x = layers.Activation("relu", name=f"{name}_relu")(x)
     if dropout > 0:
         x = layers.Dropout(dropout, name=f"{name}_drop")(x)
+    return x
+
+
+def _residual_stage(
+    x,
+    filters: int,
+    blocks: int,
+    name: str,
+    *,
+    first_stride: int = 1,
+    dropout: float = 0.15,
+) -> keras.KerasTensor:
+    x = _residual_block(
+        x, filters, f"{name}_block0", strides=first_stride, dropout=dropout
+    )
+    for block_idx in range(1, blocks):
+        x = _residual_block(
+            x, filters, f"{name}_block{block_idx}", dropout=dropout
+        )
     return x
 
 
@@ -104,11 +152,13 @@ def CustomCnnBackbone(
     name: str = "custom_cnn",
     **kwargs,
 ) -> keras.Model:
-    """CNN compacta entrenada desde cero (sin transfer learning).
+    """ResNet-18 desde cero (sin transfer learning).
 
-    Pensada para datasets medicos pequenos (~miles de imagenes): capacidad
-    moderada, regularizacion fuerte y entrada 224x224 compatible con el resto
-    del pipeline. La cabeza clasificadora la agrega ModelBuilder.
+    Baseline para el dataset completo (~20k imagenes filtradas, ~1.8k positivos):
+    stem convolucional, cuatro etapas con bloques residuales (2 por etapa) y
+    canales 64-128-256-512 (~11M parametros). Escala adecuada frente a
+    transfer learning sin ser tan pesada como ResNet-50+. La cabeza clasificadora
+    la agrega ModelBuilder.
     """
     if weights not in (None, "none"):
         raise ValueError(
@@ -118,11 +168,15 @@ def CustomCnnBackbone(
     inputs = keras.Input(shape=input_shape or (224, 224, 3), name="input")
     x = layers.Rescaling(1.0 / 255.0, name="rescale")(inputs)
 
-    # 224 -> 112 -> 56 -> 28 -> 14
-    x = _conv_block(x, 32, "block1", dropout=0.20)
-    x = _conv_block(x, 64, "block2", dropout=0.25)
-    x = _conv_block(x, 128, "block3", dropout=0.30)
-    x = _conv_block(x, 192, "block4", dropout=0.35)
+    # Stem ResNet: 224 -> 112 -> 56
+    x = _conv_bn_relu(x, 64, 7, strides=2, name="stem")
+    x = layers.MaxPooling2D(3, strides=2, padding="same", name="stem_pool")(x)
+
+    # 56 -> 28 -> 14 -> 7
+    x = _residual_stage(x, 64, 2, "stage1", dropout=0.05)
+    x = _residual_stage(x, 128, 2, "stage2", first_stride=2, dropout=0.10)
+    x = _residual_stage(x, 256, 2, "stage3", first_stride=2, dropout=0.15)
+    x = _residual_stage(x, 512, 2, "stage4", first_stride=2, dropout=0.20)
 
     if include_top:
         classes = kwargs.pop("classes", 1000)
@@ -480,6 +534,107 @@ def CheXNetDenseNet121(
 
     backbone._name = name
     return backbone
+
+
+# ---------------------------------------------------------------------------
+# Descripciones para documentacion y logging (p. ej. Comet)
+# ---------------------------------------------------------------------------
+
+ARCHITECTURE_DESCRIPTIONS: dict[str, str] = {
+    "customtiny": (
+        "CNN minima (2 capas conv + ReLU, entrada 64×64) entrenada desde cero. "
+        "Sirve como baseline de overhead del pipeline y no usa transfer learning."
+    ),
+    "customcnn": (
+        "CNN compacta entrenada desde cero (4 bloques conv 3×3 + BN + ReLU + pooling, "
+        "entrada 224×224). Pensada para datasets medicos pequenos con regularizacion "
+        "fuerte (dropout) y sin pesos preentrenados."
+    ),
+    "vgg16": (
+        "VGG-16 (Simonyan & Zisserman, 2014): 13 capas conv + 3 FC, stack de filtros "
+        "3×3. Pesos ImageNet; buen extractor generico pero mas pesada que arquitecturas "
+        "modernas. Entrada 224×224."
+    ),
+    "vgg19": (
+        "VGG-19: igual familia que VGG-16 con tres bloques conv adicionales. Mas "
+        "capacidad y parametros; preentrenada en ImageNet. Entrada 224×224."
+    ),
+    "efficientnetb0": (
+        "EfficientNet-B0 (Tan & Le, 2019): escalado compuesto de profundidad, ancho y "
+        "resolucion; Mobile Inverted Bottleneck (MBConv). La variante mas liviana de la "
+        "familia B. ImageNet, entrada 224×224."
+    ),
+    "efficientnetb1": "EfficientNet-B1: mayor ancho y resolucion que B0. ImageNet, entrada 240×240.",
+    "efficientnetb2": "EfficientNet-B2: capacidad intermedia. ImageNet, entrada 260×260.",
+    "efficientnetb3": "EfficientNet-B3: equilibrio frecuente entre costo y rendimiento. ImageNet, entrada 300×300.",
+    "efficientnetb4": "EfficientNet-B4: modelo grande de la serie B. ImageNet, entrada 380×380.",
+    "efficientnetb5": "EfficientNet-B5. ImageNet, entrada 456×456.",
+    "efficientnetb6": "EfficientNet-B6. ImageNet, entrada 528×528.",
+    "efficientnetb7": "EfficientNet-B7: maxima escala de la serie original. ImageNet, entrada 600×600.",
+    "efficientnetv2b0": (
+        "EfficientNetV2-B0 (Tan & Le, 2021): bloques Fused-MBConv y entrenamiento progresivo; "
+        "mejor trade-off velocidad/precision que EfficientNet v1. ImageNet, entrada 224×224."
+    ),
+    "efficientnetv2b1": "EfficientNetV2-B1. ImageNet, entrada 240×240.",
+    "efficientnetv2b2": "EfficientNetV2-B2. ImageNet, entrada 260×260.",
+    "efficientnetv2b3": "EfficientNetV2-B3. ImageNet, entrada 300×300.",
+    "efficientnetv2s": "EfficientNetV2-S (small). ImageNet, entrada 384×384.",
+    "efficientnetv2m": "EfficientNetV2-M (medium). ImageNet, entrada 480×480.",
+    "efficientnetv2l": "EfficientNetV2-L (large). ImageNet, entrada 480×480.",
+    "radimagenetdensenet121": (
+        "DenseNet-121 preentrenada en RadImageNet (Mei et al., Radiology AI 2022): ~1,35 M "
+        "imagenes de 7 modalidades (CT, MRI, US, etc.). Transfer learning orientado a "
+        "imagen medica; entrada 224×224, preprocesamiento rescale 1/255."
+    ),
+    "radimagenetresnet50": (
+        "ResNet-50 preentrenada en RadImageNet. Residual connections; buen compromiso "
+        "entre profundidad y entrenabilidad en dominio medico. Entrada 224×224."
+    ),
+    "radimagenetinceptionv3": (
+        "InceptionV3 preentrenada en RadImageNet (pesos oficiales a 224×224, no 299×299). "
+        "Modulos inception multi-escala. Dominio medico."
+    ),
+    "radimagenetinceptionresnetv2": (
+        "Inception-ResNet-v2 preentrenada en RadImageNet. Combina bloques inception con "
+        "conexiones residuales; alta capacidad. Entrada 224×224."
+    ),
+    "chexnet": (
+        "DenseNet-121 preentrenada con CheXNet (Rajpurkar et al.) sobre NIH ChestX-ray14 "
+        "(14 patologias toracicas, cabeza multietiqueta descartada). Especializada en "
+        "radiografia de torax; preprocesamiento DenseNet. Entrada 224×224."
+    ),
+}
+
+
+def get_backbone_description(name: str) -> str:
+    """Texto descriptivo de una arquitectura registrada."""
+    key = _normalize_name(name)
+    config = get_backbone_config(name)
+    body = ARCHITECTURE_DESCRIPTIONS.get(
+        key,
+        f"Backbone '{name}' registrado sin descripcion detallada.",
+    )
+    h, w = config.input_size
+    weights = config.default_weights or "none (desde cero)"
+    return (
+        f"Arquitectura: {key}\n"
+        f"Entrada: {h}×{w}×3\n"
+        f"Pesos por defecto: {weights}\n\n"
+        f"{body}"
+    )
+
+
+def format_all_architecture_descriptions() -> str:
+    """Catalogo de todas las arquitecturas disponibles (para informes / Comet)."""
+    lines = [
+        "Catalogo de backbones disponibles",
+        "=" * 40,
+        "",
+    ]
+    for key in available_backbones():
+        lines.append(get_backbone_description(key))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 # ---------------------------------------------------------------------------
