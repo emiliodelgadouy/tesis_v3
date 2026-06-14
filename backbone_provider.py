@@ -71,6 +71,67 @@ def CustomTinyBackbone(
     return keras.Model(inputs, x, name=name)
 
 
+def _conv_block(
+    x,
+    filters: int,
+    name: str,
+    *,
+    pool: bool = True,
+    dropout: float = 0.25,
+) -> keras.KerasTensor:
+    """Dos conv 3x3 + BN + ReLU; pooling y dropout opcionales."""
+    x = layers.Conv2D(
+        filters, 3, padding="same", use_bias=False, name=f"{name}_conv_a"
+    )(x)
+    x = layers.BatchNormalization(name=f"{name}_bn_a")(x)
+    x = layers.Activation("relu", name=f"{name}_relu_a")(x)
+    x = layers.Conv2D(
+        filters, 3, padding="same", use_bias=False, name=f"{name}_conv_b"
+    )(x)
+    x = layers.BatchNormalization(name=f"{name}_bn_b")(x)
+    x = layers.Activation("relu", name=f"{name}_relu_b")(x)
+    if pool:
+        x = layers.MaxPooling2D(2, name=f"{name}_pool")(x)
+    if dropout > 0:
+        x = layers.Dropout(dropout, name=f"{name}_drop")(x)
+    return x
+
+
+def CustomCnnBackbone(
+    weights: str | None = None,
+    include_top: bool = False,
+    input_shape: tuple[int, int, int] | None = None,
+    name: str = "custom_cnn",
+    **kwargs,
+) -> keras.Model:
+    """CNN compacta entrenada desde cero (sin transfer learning).
+
+    Pensada para datasets medicos pequenos (~miles de imagenes): capacidad
+    moderada, regularizacion fuerte y entrada 224x224 compatible con el resto
+    del pipeline. La cabeza clasificadora la agrega ModelBuilder.
+    """
+    if weights not in (None, "none"):
+        raise ValueError(
+            f"CustomCnnBackbone no usa pesos preentrenados (recibido weights={weights!r})."
+        )
+
+    inputs = keras.Input(shape=input_shape or (224, 224, 3), name="input")
+    x = layers.Rescaling(1.0 / 255.0, name="rescale")(inputs)
+
+    # 224 -> 112 -> 56 -> 28 -> 14
+    x = _conv_block(x, 32, "block1", dropout=0.20)
+    x = _conv_block(x, 64, "block2", dropout=0.25)
+    x = _conv_block(x, 128, "block3", dropout=0.30)
+    x = _conv_block(x, 192, "block4", dropout=0.35)
+
+    if include_top:
+        classes = kwargs.pop("classes", 1000)
+        x = layers.GlobalAveragePooling2D(name="avg_pool")(x)
+        x = layers.Dense(classes, activation="softmax", name="predictions")(x)
+
+    return keras.Model(inputs, x, name=name)
+
+
 # ---------------------------------------------------------------------------
 # Backbones medicos: RadImageNet (Mei et al., Radiology AI 2022) y CheXNet
 # (Rajpurkar et al., port de brucechou1983).
@@ -437,6 +498,13 @@ class BackboneConfig:
 BACKBONES: dict[str, BackboneConfig] = {
     "customtiny": BackboneConfig(
         "custom_tiny", CustomTinyBackbone, custom_tiny_preprocess_input, (64, 64),
+        default_weights=None,
+    ),
+    "customcnn": BackboneConfig(
+        "custom_cnn",
+        CustomCnnBackbone,
+        custom_tiny_preprocess_input,
+        (224, 224),
         default_weights=None,
     ),
     "vgg16": BackboneConfig("vgg16", VGG16, vgg16_preprocess_input, (224, 224)),
