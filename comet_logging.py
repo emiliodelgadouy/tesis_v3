@@ -100,6 +100,21 @@ def _plot_confusion_matrix(y_true, y_pred, *, title: str):
     return fig
 
 
+def _bag_to_montage(bag: np.ndarray) -> np.ndarray:
+    """Une las instancias (K, H, W, C) de un bag MIL en una imagen-grilla."""
+    bag = np.asarray(bag)
+    k = bag.shape[0]
+    cols = int(np.ceil(np.sqrt(k)))
+    rows = int(np.ceil(k / cols))
+    ph, pw = bag.shape[1], bag.shape[2]
+    channels = bag.shape[3] if bag.ndim == 4 else 1
+    canvas = np.zeros((rows * ph, cols * pw, channels), dtype=bag.dtype)
+    for idx in range(k):
+        r, c = divmod(idx, cols)
+        canvas[r * ph : (r + 1) * ph, c * pw : (c + 1) * pw] = bag[idx]
+    return canvas
+
+
 def _sens_spec(y_true, y_prob, thr: float) -> tuple[float, float]:
     y_true = np.asarray(y_true).astype(int).reshape(-1)
     y_pred = (np.asarray(y_prob) >= thr).astype(int)
@@ -159,6 +174,8 @@ def _log_sample_predictions(
 
     for ax, idx in zip(axes, picked):
         img = images[idx]
+        if img.ndim == 4:
+            img = _bag_to_montage(img)
         if img.dtype in (np.float16, np.float32, np.float64):
             img = img / 255.0 if img.max() > 1.0 else img
             img = np.clip(img.astype(np.float32), 0.0, 1.0)

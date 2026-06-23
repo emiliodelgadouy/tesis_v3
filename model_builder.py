@@ -8,6 +8,73 @@ from src.dataset_provider import as_tf_dataset
 from src.utils import EpochTimer
 
 
+class GatedAttentionPooling(layers.Layer):
+    """Atencion (gated) de Ilse et al. (2018) para Multiple Instance Learning.
+
+    Recibe un bag de instancias ``(B, K, D)`` y lo agrega en un unico embedding
+    de bag ``(B, D)`` ponderando cada instancia por una atencion aprendida:
+
+        a_k = softmax_k( w^T (tanh(V h_k) ⊙ sigmoid(U h_k)) )
+        z   = Σ_k a_k h_k
+
+    El gating (rama sigmoide ``U``) permite modelar relaciones no lineales
+    complejas entre instancias. Los pesos ``a_k`` quedan en ``last_attention``
+    para interpretabilidad. La capa opera en float32 (estable bajo mixed
+    precision) independientemente de la politica global.
+    """
+
+    def __init__(self, attention_dim=128, gated=True, **kwargs):
+        kwargs.setdefault("dtype", "float32")
+        super().__init__(**kwargs)
+        self.attention_dim = int(attention_dim)
+        self.gated = bool(gated)
+        self.last_attention = None
+
+    def build(self, input_shape):
+        feature_dim = int(input_shape[-1])
+        self.V = self.add_weight(
+            name="V",
+            shape=(feature_dim, self.attention_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+            dtype="float32",
+        )
+        if self.gated:
+            self.U = self.add_weight(
+                name="U",
+                shape=(feature_dim, self.attention_dim),
+                initializer="glorot_uniform",
+                trainable=True,
+                dtype="float32",
+            )
+        self.w = self.add_weight(
+            name="w",
+            shape=(self.attention_dim, 1),
+            initializer="glorot_uniform",
+            trainable=True,
+            dtype="float32",
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        h = tf.cast(inputs, tf.float32)
+        vh = tf.tanh(tf.matmul(h, self.V))
+        if self.gated:
+            vh = vh * tf.sigmoid(tf.matmul(h, self.U))
+        scores = tf.matmul(vh, self.w)
+        attention = tf.nn.softmax(scores, axis=1)
+        self.last_attention = attention
+        return tf.reduce_sum(attention * h, axis=1)
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[-1])
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"attention_dim": self.attention_dim, "gated": self.gated})
+        return config
+
+
 class ModelBuilder:
     def __init__(
         self,
@@ -29,6 +96,10 @@ class ModelBuilder:
         min_lr=1e-7,
         aggressive_augmentation=False,
         initial_bias=None,
+        mil_mode=False,
+        bag_size=None,
+        attention_dim=128,
+        attention_gated=True,
     ):
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
@@ -36,6 +107,10 @@ class ModelBuilder:
         self.backbone.trainable = backbone_trainable
         self.input_shape = backbone.input_shape[1:3]
         self.aggressive_augmentation = bool(aggressive_augmentation)
+        self.mil_mode = bool(mil_mode)
+        self.bag_size = int(bag_size) if bag_size is not None else None
+        self.attention_dim = int(attention_dim)
+        self.attention_gated = bool(attention_gated)
         self.top_dense = top_dense
         self.dropout = dropout
         self.learning_rate = learning_rate
@@ -121,6 +196,16 @@ class ModelBuilder:
 
     def inputs(self):
         return keras.Input(shape=(self.IMG_SIZE[0], self.IMG_SIZE[1], 3), name="image")
+
+    def mil_inputs(self):
+        if not self.bag_size:
+            raise ValueError(
+                "mil_mode requiere bag_size (numero de instancias por bag)."
+            )
+        return keras.Input(
+            shape=(self.bag_size, self.IMG_SIZE[0], self.IMG_SIZE[1], 3),
+            name="bag",
+        )
 
     def output(self, x):
         # Keep classifier head in float32 for numeric stability under mixed precision.
@@ -212,6 +297,8 @@ class ModelBuilder:
         return self
 
     def build(self):
+        if self.mil_mode:
+            return self.build_mil()
         inputs = self.inputs()
         # x = self.resize(inputs)
         x = self.augmentation(inputs)
@@ -220,6 +307,43 @@ class ModelBuilder:
         x = self.head(x)
         outputs = self.output(x)
         self.model = keras.Model(inputs, outputs, name="simple_validation_vgg")
+        self.compile()
+        return self
+
+    def build_mil(self):
+        """Arma un modelo ABMIL: backbone compartido por instancia + atencion.
+
+        Cada bag ``(K, H, W, 3)`` pasa por el mismo backbone via
+        ``TimeDistributed`` (pesos compartidos entre las K instancias). Se obtiene
+        un embedding por instancia, se agregan con atencion gated en un embedding
+        de bag y un clasificador lineal produce un logit por bag.
+        """
+        inputs = self.mil_inputs()
+        x = layers.TimeDistributed(self.augmentation_seq(), name="td_augmentation")(inputs)
+        x = layers.TimeDistributed(
+            layers.Lambda(self.preprocess_input, name="preprocess_input"),
+            name="td_preprocess",
+        )(x)
+        x = layers.TimeDistributed(self.backbone, name="td_backbone")(x)
+        x = layers.TimeDistributed(
+            layers.GlobalAveragePooling2D(name="gap"), name="td_gap"
+        )(x)
+        x = layers.TimeDistributed(
+            layers.Dense(self.top_dense, activation="relu", name="instance_dense"),
+            name="td_instance_dense",
+        )(x)
+        x = layers.TimeDistributed(
+            layers.Dropout(self.dropout, name="instance_dropout"),
+            name="td_instance_dropout",
+        )(x)
+        x = GatedAttentionPooling(
+            attention_dim=self.attention_dim,
+            gated=self.attention_gated,
+            name="attention_pooling",
+        )(x)
+        x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
+        outputs = self.output(x)
+        self.model = keras.Model(inputs, outputs, name="abmil")
         self.compile()
         return self
 
