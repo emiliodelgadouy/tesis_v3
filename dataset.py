@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import subprocess
-import shutil
-import sys
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,57 +76,23 @@ def authenticate_colab_user() -> None:
     auth.authenticate_user()
 
 
-def _run_command(command: list[str]) -> None:
-    print("+", " ".join(command))
-    result = subprocess.run(
-        command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
 
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-
-    result.check_returncode()
-
-
-def _resolve_command(name: str) -> str:
-    executable = shutil.which(name)
-    if executable:
-        return executable
-
-    local_executable = Path(sys.executable).with_name(name)
-    if local_executable.is_file():
-        return str(local_executable)
-
-    return name
+def _gcs_uri_to_https(uri: str) -> str:
+    assert uri.startswith("gs://"), f"URI GCS inválida: {uri}"
+    return "https://storage.googleapis.com/" + uri[len("gs://"):]
 
 
 def _download_from_gcs(source: str, destination_file: Path) -> None:
+    import requests  # type: ignore
+
     destination_file.parent.mkdir(parents=True, exist_ok=True)
-
-    commands = [
-        [_resolve_command("gcloud"), "storage", "cp", source, str(destination_file)],
-        [_resolve_command("gsutil"), "-m", "cp", source, str(destination_file)],
-    ]
-
-    last_error = None
-
-    for command in commands:
-        try:
-            _run_command(command)
-            if destination_file.is_file() and destination_file.stat().st_size > 0:
-                return
-        except (FileNotFoundError, subprocess.CalledProcessError) as error:
-            last_error = error
-
-    raise FileNotFoundError(
-        f"No se pudo descargar {source} hacia {destination_file}. "
-        f"Último error: {last_error}"
-    )
+    url = _gcs_uri_to_https(source)
+    print(f"GET {url}")
+    with requests.get(url, stream=True, timeout=300) as response:
+        response.raise_for_status()
+        with destination_file.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                f.write(chunk)
 
 
 def _has_extracted_images(config: DatasetConfig) -> bool:
@@ -149,14 +112,9 @@ def ensure_dataset_downloaded(config: DatasetConfig) -> None:
 
     if not config.tar_local.is_file() or config.tar_local.stat().st_size == 0:
         print("Downloading images...")
-        _download_from_gcs(
-            config.gcs_images_tar,
-            config.tar_local)
+        _download_from_gcs(config.gcs_images_tar, config.tar_local)
         if not config.tar_local.is_file() or config.tar_local.stat().st_size == 0:
-            raise FileNotFoundError(
-                f"No se pudo descargar {config.tar_local}. "
-                "Instalá crcmod y revisá credenciales de GCS."
-            )
+            raise FileNotFoundError(f"No se pudo descargar {config.tar_local}.")
         print("Images downloaded")
 
     if config.extract_images and not _has_extracted_images(config):
@@ -167,9 +125,7 @@ def ensure_dataset_downloaded(config: DatasetConfig) -> None:
 
     if not config.csv_main.is_file() or config.csv_main.stat().st_size == 0:
         print("Downloading CSV...")
-        _download_from_gcs(
-            config.gcs_data_csv,
-            config.csv_main)
+        _download_from_gcs(config.gcs_data_csv, config.csv_main)
         print("CSV downloaded")
 
 
