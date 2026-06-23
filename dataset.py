@@ -67,16 +67,6 @@ def ensure_dataset_dirs(config: DatasetConfig) -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
 
-def authenticate_colab_user() -> None:
-    try:
-        from google.colab import auth  # type: ignore
-    except ImportError:
-        return
-
-    auth.authenticate_user()
-
-
-
 def _gcs_uri_to_https(uri: str) -> str:
     assert uri.startswith("gs://"), f"URI GCS inválida: {uri}"
     return "https://storage.googleapis.com/" + uri[len("gs://"):]
@@ -107,8 +97,6 @@ def ensure_dataset_downloaded(config: DatasetConfig) -> None:
 
     if not config.download_from_gcs:
         return
-
-    authenticate_colab_user()
 
     if not config.tar_local.is_file() or config.tar_local.stat().st_size == 0:
         print("Downloading images...")
