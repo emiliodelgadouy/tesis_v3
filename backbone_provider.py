@@ -339,6 +339,55 @@ def _ensure_radimagenet_weights() -> Path:
     return cache_dir
 
 
+def _load_legacy_h5_model(weights_path: Path):
+    """Carga un modelo Keras guardado en formato legacy (.h5 de Keras 2).
+
+    Keras 3 rechaza nombres de capa con '/' (p. ej. 'conv1/conv') al deserializar
+    estos .h5 antiguos. ``tf_keras`` (el paquete de compatibilidad Keras 2) los
+    carga sin problema; lo instalamos al vuelo si no esta disponible.
+    """
+    try:
+        import tf_keras  # type: ignore
+    except ImportError:
+        import subprocess
+        import sys
+
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "tf-keras"],
+            check=True,
+        )
+        import tf_keras  # type: ignore
+
+    return tf_keras.models.load_model(str(weights_path), compile=False)
+
+
+def _transfer_legacy_weights(target_model: keras.Model, weights_path: Path) -> None:
+    """Transfiere por posicion los pesos de un .h5 legacy a un modelo Keras 3.
+
+    Construimos la arquitectura limpia en Keras 3 (nombres validos) y copiamos
+    los pesos del modelo legacy en el mismo orden topologico. Las arquitecturas
+    son identicas (misma familia de ``keras.applications``), por lo que el orden
+    y las formas coinciden; validamos ambas cosas para fallar de forma explicita.
+    """
+    legacy_model = _load_legacy_h5_model(weights_path)
+    source_weights = legacy_model.get_weights()
+    target_weights = target_model.get_weights()
+
+    if len(source_weights) != len(target_weights):
+        raise ValueError(
+            "No se pueden transferir los pesos legacy: el modelo guardado tiene "
+            f"{len(source_weights)} tensores y el modelo destino {len(target_weights)}. "
+            "Verifica que la arquitectura coincide."
+        )
+    for index, (src, dst) in enumerate(zip(source_weights, target_weights)):
+        if src.shape != dst.shape:
+            raise ValueError(
+                f"Forma incompatible al transferir el peso {index}: "
+                f"{src.shape} (legacy) vs {dst.shape} (destino)."
+            )
+    target_model.set_weights(source_weights)
+
+
 def _radimagenet_weights_path(model_key: str) -> Path:
     cache_dir = _ensure_radimagenet_weights()
     h5_files = _list_radimagenet_h5(cache_dir)
@@ -399,35 +448,15 @@ def _build_radimagenet_backbone(
 
     if weights == "radimagenet":
         weights_path = _radimagenet_weights_path(model_key)
-        # Los .h5 oficiales son archivos *_notop.h5 guardados con Keras 2.4 que
-        # incluyen arquitectura + pesos y ya no tienen cabeza de clasificacion;
-        # el input esta fijado a (None, 224, 224, 3). Cargarlos directamente con
-        # load_model preserva todos los pesos exactamente (incluyendo BN).
-        saved = keras.models.load_model(str(weights_path), compile=False)
-
-        inputs = saved.inputs[0] if saved.inputs else saved.input
-        output_tensor = saved.outputs[0] if saved.outputs else saved.output
-
-        if len(output_tensor.shape) != 4:
-            last_spatial_layer = None
-            for layer in reversed(saved.layers):
-                try:
-                    layer_out = layer.output
-                    if isinstance(layer_out, list):
-                        layer_out = layer_out[0]
-                    if len(layer_out.shape) == 4:
-                        last_spatial_layer = layer
-                        break
-                except Exception:
-                    continue
-            if last_spatial_layer is None:
-                raise ValueError(
-                    f"No se encontro ninguna capa espacial (4D) en el modelo RadImageNet "
-                    f"cargado desde {weights_path}. Verifica que el .h5 es correcto."
-                )
-            output_tensor = last_spatial_layer.output
-
-        base_model = keras.Model(inputs=inputs, outputs=output_tensor, name=name)
+        # Los .h5 oficiales son *_notop.h5 guardados con Keras 2.4 (arquitectura +
+        # pesos, sin cabeza). Keras 3 no puede deserializar su arquitectura porque
+        # las capas usan nombres con '/' (p. ej. 'conv1/conv'). Reconstruimos la
+        # arquitectura limpia en Keras 3 y transferimos los pesos por posicion
+        # desde el modelo legacy (cargado con tf_keras), preservando BN incluido.
+        base_model = base_model_fn(
+            weights=None, include_top=False, input_shape=input_shape, **kwargs
+        )
+        _transfer_legacy_weights(base_model, weights_path)
     elif weights == "imagenet":
         base_model = base_model_fn(
             weights="imagenet", include_top=False, input_shape=input_shape, **kwargs
