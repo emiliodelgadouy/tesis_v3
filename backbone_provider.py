@@ -424,7 +424,18 @@ def _ensure_chexnet_weights() -> Path:
 
 
 def radimagenet_preprocess_input(x):
-    """Preprocesamiento usado en el sample code oficial de RadImageNet (rescale 1/255)."""
+    """Preprocesamiento fiel al entrenamiento TF oficial de RadImageNet.
+
+    El codigo TF de RadImageNet uso ``ImageDataGenerator(preprocessing_function=
+    preprocess_input, rescale=1/255)``: primero ``preprocess_input`` en modo
+    ``caffe`` (RGB->BGR y resta de la media de ImageNet, sin escalar) y LUEGO
+    ``/255``. Es decir ``(BGR - [103.94, 116.78, 123.68]) / 255`` (rango
+    ~[-0.49, 0.59]). Usar solo ``x/255`` ([0,1]) NO coincide con la distribucion
+    de entrada esperada por los pesos y degrada fuertemente las features.
+    """
+    from tensorflow.keras.applications.imagenet_utils import preprocess_input
+
+    x = preprocess_input(x, mode="caffe")
     return x / 255.0
 
 
