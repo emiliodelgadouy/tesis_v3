@@ -872,6 +872,7 @@ class TfDatasetConfig:
     # trocea en una grilla de parches (instancias) que cubren toda la mama.
     bag_mode: bool = False
     bag_grid: tuple[int, int] = (3, 3)
+    bag_keras_tiling: bool = False
 
     def needs_roi_columns(self) -> bool:
         if self.bag_mode:
@@ -922,6 +923,7 @@ class DatasetProviderConfig:
     positive_mixup_probability: float = 0.5
     bag_mode: bool = False
     bag_grid: tuple[int, int] = (3, 3)
+    bag_keras_tiling: bool = False
 
     def __post_init__(self) -> None:
         self.image_size = _normalize_size(self.image_size)
@@ -960,6 +962,7 @@ class DatasetProviderConfig:
             positive_mixup_probability=self.positive_mixup_probability,
             bag_mode=self.bag_mode,
             bag_grid=self.bag_grid,
+            bag_keras_tiling=self.bag_keras_tiling,
         )
 
 
@@ -1178,10 +1181,17 @@ class InspectDataset:
         )
         if self.config.bag_mode:
             rows, cols = self.config.bag_grid
-            print(
-                f"  modo bag (MIL): grilla {rows}x{cols} = {rows * cols} instancias "
-                f"de {self.config.image_size} por imagen"
-            )
+            if self.config.bag_keras_tiling:
+                print(
+                    f"  modo bag (MIL, tiling Keras): imagen completa {rows * self.config.image_size[0]}"
+                    f"x{cols * self.config.image_size[1]} -> BagTiling en modelo -> "
+                    f"{rows * cols} tiles de {self.config.image_size}"
+                )
+            else:
+                print(
+                    f"  modo bag (MIL): grilla {rows}x{cols} = {rows * cols} instancias "
+                    f"de {self.config.image_size} por imagen"
+                )
         if self.config.patch_mode:
             if self.config.patch_crop_strategy is not None:
                 crop_desc = f"crop={self.config.patch_crop_strategy}"
@@ -1657,12 +1667,14 @@ class DatasetProvider:
         return img
 
     def _make_bag(self, img: tf.Tensor) -> tf.Tensor:
-        """Trocea una imagen en una grilla (rows x cols) de parches (instancias).
+        """Redimensiona y, opcionalmente, trocea en una grilla (rows x cols).
 
-        La imagen se reescala a (rows*ph, cols*pw) y se parte en rows*cols
-        baldosas contiguas de tamano (ph, pw). El conjunto de baldosas cubre
-        toda la mama, garantizando que la lesion caiga en alguna instancia para
-        los bags positivos (supuesto estandar de MIL).
+        Con bag_keras_tiling=False (defecto): devuelve (K, ph, pw, 3) —
+        el tiling ocurre aqui en tf.data, la augmentacion se aplica por tile.
+
+        Con bag_keras_tiling=True: devuelve (rows*ph, cols*pw, 3) —
+        el tiling lo realiza la capa BagTiling dentro del modelo Keras,
+        permitiendo que la augmentacion se aplique sobre la imagen completa (1x).
         """
         rows, cols = self.config.bag_grid
         ph, pw = self._height, self._width
@@ -1674,6 +1686,8 @@ class DatasetProvider:
                 self.config.clahe_tile_grid,
             )
         full.set_shape([rows * ph, cols * pw, 3])
+        if self.config.bag_keras_tiling:
+            return full
         tiles = tf.reshape(full, [rows, ph, cols, pw, 3])
         tiles = tf.transpose(tiles, [0, 2, 1, 3, 4])
         bag = tf.reshape(tiles, [rows * cols, ph, pw, 3])

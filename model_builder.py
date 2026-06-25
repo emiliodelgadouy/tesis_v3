@@ -75,6 +75,46 @@ class GatedAttentionPooling(layers.Layer):
         return config
 
 
+class BagTiling(layers.Layer):
+    """Divide una imagen (rows*ph, cols*pw, C) en K=rows*cols tiles de (ph, pw, C).
+
+    Permite aplicar augmentacion y preprocessing sobre la imagen completa (1x)
+    antes de tilear, en lugar de hacerlo por tile via TimeDistributed (K veces).
+    Solo se usa en MIL con bag_keras_tiling=True.
+    """
+
+    def __init__(self, bag_grid, **kwargs):
+        super().__init__(**kwargs)
+        self.rows = int(bag_grid[0])
+        self.cols = int(bag_grid[1])
+
+    def call(self, x):
+        # x: (B, rows*ph, cols*pw, C)
+        rows, cols = self.rows, self.cols
+        B = tf.shape(x)[0]
+        static_H, static_W, static_C = x.shape[1], x.shape[2], x.shape[3]
+        dyn = tf.shape(x)
+        ph_dyn, pw_dyn, C_dyn = dyn[1] // rows, dyn[2] // cols, dyn[3]
+        x = tf.reshape(x, [B, rows, ph_dyn, cols, pw_dyn, C_dyn])
+        x = tf.transpose(x, [0, 1, 3, 2, 4, 5])
+        x = tf.reshape(x, [B, rows * cols, ph_dyn, pw_dyn, C_dyn])
+        ph_s = static_H // rows if static_H is not None else None
+        pw_s = static_W // cols if static_W is not None else None
+        x.set_shape([None, rows * cols, ph_s, pw_s, static_C])
+        return x
+
+    def compute_output_shape(self, input_shape):
+        B, H, W, C = input_shape
+        ph = H // self.rows if H is not None else None
+        pw = W // self.cols if W is not None else None
+        return (B, self.rows * self.cols, ph, pw, C)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"bag_grid": (self.rows, self.cols)})
+        return config
+
+
 class ModelBuilder:
     def __init__(
         self,
@@ -100,6 +140,8 @@ class ModelBuilder:
         bag_size=None,
         attention_dim=128,
         attention_gated=True,
+        bag_grid=(3, 3),
+        bag_keras_tiling=False,
     ):
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
@@ -111,6 +153,8 @@ class ModelBuilder:
         self.bag_size = int(bag_size) if bag_size is not None else None
         self.attention_dim = int(attention_dim)
         self.attention_gated = bool(attention_gated)
+        self.bag_grid = (int(bag_grid[0]), int(bag_grid[1]))
+        self.bag_keras_tiling = bool(bag_keras_tiling)
         self.top_dense = top_dense
         self.dropout = dropout
         self.learning_rate = learning_rate
@@ -205,6 +249,15 @@ class ModelBuilder:
         return keras.Input(
             shape=(self.bag_size, self.IMG_SIZE[0], self.IMG_SIZE[1], 3),
             name="bag",
+        )
+
+    def mil_inputs_full(self):
+        """Input de imagen completa para MIL con tiling Keras (bag_keras_tiling=True)."""
+        rows, cols = self.bag_grid
+        H, W = self.IMG_SIZE
+        return keras.Input(
+            shape=(rows * H, cols * W, 3),
+            name="bag_full_image",
         )
 
     def output(self, x):
@@ -311,13 +364,13 @@ class ModelBuilder:
         return self
 
     def build_mil(self):
-        """Arma un modelo ABMIL: backbone compartido por instancia + atencion.
+        """Arma un modelo ABMIL: backbone compartido por instancia + atencion."""
+        if self.bag_keras_tiling:
+            return self._build_mil_keras_tiling()
+        return self._build_mil_td_tiling()
 
-        Cada bag ``(K, H, W, 3)`` pasa por el mismo backbone via
-        ``TimeDistributed`` (pesos compartidos entre las K instancias). Se obtiene
-        un embedding por instancia, se agregan con atencion gated en un embedding
-        de bag y un clasificador lineal produce un logit por bag.
-        """
+    def _build_mil_td_tiling(self):
+        """ABMIL original: tiling en tf.data, augmentacion aplicada por tile via TimeDistributed."""
         inputs = self.mil_inputs()
         x = layers.TimeDistributed(self.augmentation_seq(), name="td_augmentation")(inputs)
         x = layers.TimeDistributed(
@@ -344,6 +397,40 @@ class ModelBuilder:
         x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
         outputs = self.output(x)
         self.model = keras.Model(inputs, outputs, name="abmil")
+        self.compile()
+        return self
+
+    def _build_mil_keras_tiling(self):
+        """ABMIL con augmentacion en imagen completa y tiling como capa Keras.
+
+        El input es la imagen redimensionada completa (rows*ph, cols*pw, 3).
+        La augmentacion se aplica 1x sobre ella antes de tilear, en lugar de
+        K veces via TimeDistributed. BagTiling la divide en (K, ph, pw, 3).
+        """
+        inputs = self.mil_inputs_full()
+        x = self.augmentation(inputs)
+        x = self.preprocess(x)
+        x = BagTiling(self.bag_grid, name="bag_tiling")(x)
+        x = layers.TimeDistributed(self.backbone, name="td_backbone")(x)
+        x = layers.TimeDistributed(
+            layers.GlobalAveragePooling2D(name="gap"), name="td_gap"
+        )(x)
+        x = layers.TimeDistributed(
+            layers.Dense(self.top_dense, activation="relu", name="instance_dense"),
+            name="td_instance_dense",
+        )(x)
+        x = layers.TimeDistributed(
+            layers.Dropout(self.dropout, name="instance_dropout"),
+            name="td_instance_dropout",
+        )(x)
+        x = GatedAttentionPooling(
+            attention_dim=self.attention_dim,
+            gated=self.attention_gated,
+            name="attention_pooling",
+        )(x)
+        x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
+        outputs = self.output(x)
+        self.model = keras.Model(inputs, outputs, name="abmil_keras_tiling")
         self.compile()
         return self
 
