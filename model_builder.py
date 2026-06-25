@@ -4,6 +4,8 @@ from tensorflow import keras
 from tensorflow.keras import layers
 import tensorflow as tf
 
+from src.clam import CLAMAttentionBlock, CLAMTrainingModel
+from src.modes import is_mil_mode, resolve_training_mode
 from src.dataset_provider import as_tf_dataset
 from src.utils import EpochTimer
 
@@ -136,25 +138,36 @@ class ModelBuilder:
         min_lr=1e-7,
         aggressive_augmentation=False,
         initial_bias=None,
-        mil_mode=False,
+        mode: str = "simple",
         bag_size=None,
         attention_dim=128,
         attention_gated=True,
         bag_grid=(3, 3),
         bag_keras_tiling=False,
+        clam_k_sample=8,
+        clam_bag_loss_weight=0.7,
+        # Legacy (se resuelven en `mode`):
+        mil_mode=None,
+        architecture_name=None,
     ):
+        self.mode = resolve_training_mode(
+            mode=mode,
+            mil_mode=mil_mode,
+            architecture_name=architecture_name,
+        )
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
         self.preprocess_input = preprocess_input
         self.backbone.trainable = backbone_trainable
         self.input_shape = backbone.input_shape[1:3]
         self.aggressive_augmentation = bool(aggressive_augmentation)
-        self.mil_mode = bool(mil_mode)
         self.bag_size = int(bag_size) if bag_size is not None else None
         self.attention_dim = int(attention_dim)
         self.attention_gated = bool(attention_gated)
         self.bag_grid = (int(bag_grid[0]), int(bag_grid[1]))
         self.bag_keras_tiling = bool(bag_keras_tiling)
+        self.clam_k_sample = int(clam_k_sample)
+        self.clam_bag_loss_weight = float(clam_bag_loss_weight)
         self.top_dense = top_dense
         self.dropout = dropout
         self.learning_rate = learning_rate
@@ -244,7 +257,7 @@ class ModelBuilder:
     def mil_inputs(self):
         if not self.bag_size:
             raise ValueError(
-                "mil_mode requiere bag_size (numero de instancias por bag)."
+                "MODE ABMIL/CLAM requiere bag_size (numero de instancias por bag)."
             )
         return keras.Input(
             shape=(self.bag_size, self.IMG_SIZE[0], self.IMG_SIZE[1], 3),
@@ -350,7 +363,7 @@ class ModelBuilder:
         return self
 
     def build(self):
-        if self.mil_mode:
+        if is_mil_mode(self.mode):
             return self.build_mil()
         inputs = self.inputs()
         # x = self.resize(inputs)
@@ -364,15 +377,20 @@ class ModelBuilder:
         return self
 
     def build_mil(self):
-        """Arma un modelo ABMIL: backbone compartido por instancia + atencion."""
+        """Arma un modelo MIL (ABMIL o CLAM) segun ``mode``."""
+        if self.mode == "clam":
+            if self.bag_keras_tiling:
+                return self._build_clam_keras_tiling()
+            return self._build_clam_td_tiling()
         if self.bag_keras_tiling:
             return self._build_mil_keras_tiling()
         return self._build_mil_td_tiling()
 
-    def _build_mil_td_tiling(self):
-        """ABMIL original: tiling en tf.data, augmentacion aplicada por tile via TimeDistributed."""
-        inputs = self.mil_inputs()
-        x = layers.TimeDistributed(self.augmentation_seq(), name="td_augmentation")(inputs)
+    def _encode_mil_instances(self, inputs):
+        """Backbone compartido + embedding por instancia -> (B, K, D)."""
+        x = layers.TimeDistributed(self.augmentation_seq(), name="td_augmentation")(
+            inputs
+        )
         x = layers.TimeDistributed(
             layers.Lambda(self.preprocess_input, name="preprocess_input"),
             name="td_preprocess",
@@ -389,25 +407,10 @@ class ModelBuilder:
             layers.Dropout(self.dropout, name="instance_dropout"),
             name="td_instance_dropout",
         )(x)
-        x = GatedAttentionPooling(
-            attention_dim=self.attention_dim,
-            gated=self.attention_gated,
-            name="attention_pooling",
-        )(x)
-        x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
-        outputs = self.output(x)
-        self.model = keras.Model(inputs, outputs, name="abmil")
-        self.compile()
-        return self
+        return x
 
-    def _build_mil_keras_tiling(self):
-        """ABMIL con augmentacion en imagen completa y tiling como capa Keras.
-
-        El input es la imagen redimensionada completa (rows*ph, cols*pw, 3).
-        La augmentacion se aplica 1x sobre ella antes de tilear, en lugar de
-        K veces via TimeDistributed. BagTiling la divide en (K, ph, pw, 3).
-        """
-        inputs = self.mil_inputs_full()
+    def _encode_mil_instances_keras_tiling(self, inputs):
+        """Imagen completa -> augment/preprocess -> tiles -> embeddings por instancia."""
         x = self.augmentation(inputs)
         x = self.preprocess(x)
         x = BagTiling(self.bag_grid, name="bag_tiling")(x)
@@ -423,6 +426,26 @@ class ModelBuilder:
             layers.Dropout(self.dropout, name="instance_dropout"),
             name="td_instance_dropout",
         )(x)
+        return x
+
+    def _finalize_mil_model(self, inputs, outputs, *, model_name):
+        if self.mode == "clam":
+            self.model = CLAMTrainingModel(
+                inputs,
+                outputs,
+                name=model_name,
+                clam_attention_layer_name="clam_attention",
+                bag_loss_weight=self.clam_bag_loss_weight,
+            )
+        else:
+            self.model = keras.Model(inputs, outputs, name=model_name)
+        self.compile()
+        return self
+
+    def _build_mil_td_tiling(self):
+        """ABMIL original: tiling en tf.data, augmentacion aplicada por tile via TimeDistributed."""
+        inputs = self.mil_inputs()
+        x = self._encode_mil_instances(inputs)
         x = GatedAttentionPooling(
             attention_dim=self.attention_dim,
             gated=self.attention_gated,
@@ -430,9 +453,57 @@ class ModelBuilder:
         )(x)
         x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
         outputs = self.output(x)
-        self.model = keras.Model(inputs, outputs, name="abmil_keras_tiling")
-        self.compile()
-        return self
+        return self._finalize_mil_model(inputs, outputs, model_name="abmil")
+
+    def _build_mil_keras_tiling(self):
+        """ABMIL con augmentacion en imagen completa y tiling como capa Keras.
+
+        El input es la imagen redimensionada completa (rows*ph, cols*pw, 3).
+        La augmentacion se aplica 1x sobre ella antes de tilear, en lugar de
+        K veces via TimeDistributed. BagTiling la divide en (K, ph, pw, 3).
+        """
+        inputs = self.mil_inputs_full()
+        x = self._encode_mil_instances_keras_tiling(inputs)
+        x = GatedAttentionPooling(
+            attention_dim=self.attention_dim,
+            gated=self.attention_gated,
+            name="attention_pooling",
+        )(x)
+        x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
+        outputs = self.output(x)
+        return self._finalize_mil_model(inputs, outputs, model_name="abmil_keras_tiling")
+
+    def _build_clam_td_tiling(self):
+        """CLAM-SB con tiling en tf.data (misma entrada que ABMIL td)."""
+        inputs = self.mil_inputs()
+        x = self._encode_mil_instances(inputs)
+        x = CLAMAttentionBlock(
+            attention_dim=self.attention_dim,
+            gated=self.attention_gated,
+            k_sample=self.clam_k_sample,
+            n_classes=2,
+            name="clam_attention",
+        )(x)
+        x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
+        outputs = self.output(x)
+        return self._finalize_mil_model(inputs, outputs, model_name="clam")
+
+    def _build_clam_keras_tiling(self):
+        """CLAM-SB con augmentacion en imagen completa y BagTiling en Keras."""
+        inputs = self.mil_inputs_full()
+        x = self._encode_mil_instances_keras_tiling(inputs)
+        x = CLAMAttentionBlock(
+            attention_dim=self.attention_dim,
+            gated=self.attention_gated,
+            k_sample=self.clam_k_sample,
+            n_classes=2,
+            name="clam_attention",
+        )(x)
+        x = layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
+        outputs = self.output(x)
+        return self._finalize_mil_model(
+            inputs, outputs, model_name="clam_keras_tiling"
+        )
 
     def summary(self):
         return self.model.summary()

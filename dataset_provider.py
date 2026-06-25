@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
+from src.modes import is_mil_mode, normalize_mode, resolve_mode_kwargs
+
 SplitName = Literal["train", "val", "test"]
 PatchSampling = Literal["uniform", "normal"]
 PatchCropStrategy = Literal["uniform", "roi", "normal", "avoid_roi"]
@@ -868,14 +870,13 @@ class TfDatasetConfig:
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
     positive_mixup_probability: float = 0.5
-    # Modo Multiple Instance Learning (ABMIL): cada imagen es un "bag" y se
-    # trocea en una grilla de parches (instancias) que cubren toda la mama.
-    bag_mode: bool = False
+    # Modo MIL (ABMIL / CLAM): cada imagen es un "bag" troceado en parches.
+    mode: str = "simple"
     bag_grid: tuple[int, int] = (3, 3)
     bag_keras_tiling: bool = False
 
     def needs_roi_columns(self) -> bool:
-        if self.bag_mode:
+        if is_mil_mode(self.mode):
             return False
         if not self.patch_mode:
             return False
@@ -921,13 +922,14 @@ class DatasetProviderConfig:
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
     positive_mixup_probability: float = 0.5
-    bag_mode: bool = False
+    mode: str = "simple"
     bag_grid: tuple[int, int] = (3, 3)
     bag_keras_tiling: bool = False
 
     def __post_init__(self) -> None:
         self.image_size = _normalize_size(self.image_size)
         self.bag_grid = (int(self.bag_grid[0]), int(self.bag_grid[1]))
+        self.mode = normalize_mode(self.mode)
 
     def with_overrides(self, **kwargs: Any) -> DatasetProviderConfig:
         return replace(self, **kwargs)
@@ -960,7 +962,7 @@ class DatasetProviderConfig:
             positive_mixup=self.positive_mixup,
             positive_mixup_alpha=self.positive_mixup_alpha,
             positive_mixup_probability=self.positive_mixup_probability,
-            bag_mode=self.bag_mode,
+            mode=self.mode,
             bag_grid=self.bag_grid,
             bag_keras_tiling=self.bag_keras_tiling,
         )
@@ -1160,8 +1162,9 @@ class InspectDataset:
             "use_clahe": self.config.use_clahe,
             "lateralize": self.config.lateralize,
             "patch_mode": self.config.patch_mode,
-            "bag_mode": self.config.bag_mode,
-            "bag_grid": self.config.bag_grid if self.config.bag_mode else None,
+            "bag_mode": is_mil_mode(self.config.mode),
+            "mode": self.config.mode,
+            "bag_grid": self.config.bag_grid if is_mil_mode(self.config.mode) else None,
             "image_size": self.config.image_size,
         }
 
@@ -1179,7 +1182,7 @@ class InspectDataset:
             f"  pixeles: min={img_stats['min']:.2f} max={img_stats['max']:.2f} "
             f"mean={img_stats['mean']:.2f} std={img_stats['std']:.2f}"
         )
-        if self.config.bag_mode:
+        if is_mil_mode(self.config.mode):
             rows, cols = self.config.bag_grid
             if self.config.bag_keras_tiling:
                 print(
@@ -1265,7 +1268,7 @@ class InspectDataset:
             raise ValueError(f"El dataset {self.name!r} no produjo batches.")
         images = _images_to_display(np.concatenate(images_batches, axis=0))
         if images.ndim == 5:
-            grid = self.config.bag_grid if self.config.bag_mode else None
+            grid = self.config.bag_grid if is_mil_mode(self.config.mode) else None
             images = np.stack([_montage_bag(bag, grid) for bag in images])
         labels = np.concatenate(labels_batches, axis=0).reshape(-1)
         n = len(labels)
@@ -1737,7 +1740,7 @@ class DatasetProvider:
                 flipped_xmin, flipped_xmax = _flip_roi_norm_x(roi_xmin, roi_xmax)
                 roi_xmin = tf.where(flip, flipped_xmin, roi_xmin)
                 roi_xmax = tf.where(flip, flipped_xmax, roi_xmax)
-        if self.config.bag_mode:
+        if is_mil_mode(self.config.mode):
             return self._make_bag(img), label
         crop_meta: tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor] | None = None
         if self.config.patch_mode:
@@ -1992,6 +1995,7 @@ def build_dataset_provider(
                 "Indica `config=DatasetProviderConfig(...)` o los argumentos "
                 "image_size y batch_size."
             )
+        kwargs = resolve_mode_kwargs(kwargs)
         config = DatasetProviderConfig(
             image_size=image_size,
             batch_size=batch_size,
