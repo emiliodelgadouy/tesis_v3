@@ -77,7 +77,7 @@ def _instance_loss_for_class(
         per_inst = keras.losses.sparse_categorical_crossentropy(
             targets, logits, from_logits=True
         )
-        return tf.reduce_sum(per_inst), b
+        return tf.reduce_sum(per_inst), tf.size(per_inst)
 
     def _zero():
         return tf.constant(0.0, dtype=tf.float32), tf.constant(0, dtype=tf.int32)
@@ -102,7 +102,7 @@ def clam_instance_clustering_loss(
     attention = tf.squeeze(attention, axis=-1)
 
     total_loss = tf.constant(0.0, dtype=tf.float32)
-    active = tf.constant(0, dtype=tf.int32)
+    n_instances = tf.constant(0, dtype=tf.int32)
     for class_idx, classifier in enumerate(instance_classifiers):
         class_loss, count = _instance_loss_for_class(
             h,
@@ -113,11 +113,13 @@ def clam_instance_clustering_loss(
             k_sample=k_sample,
         )
         total_loss += class_loss
-        active += count
+        n_instances += count
 
+    # Media de la cross-entropy por instancia seleccionada (igual que el
+    # nn.CrossEntropyLoss con reduccion 'mean' del CLAM original).
     return tf.cond(
-        active > 0,
-        lambda: total_loss / tf.cast(active, tf.float32),
+        n_instances > 0,
+        lambda: total_loss / tf.cast(n_instances, tf.float32),
         lambda: tf.constant(0.0, dtype=tf.float32),
     )
 
@@ -226,10 +228,10 @@ class CLAMTrainingModel(keras.Model):
     def _clam_layer(self) -> CLAMAttentionBlock:
         return self.get_layer(self.clam_attention_layer_name)
 
-    def _combined_loss(self, x, y, *, training: bool):
+    def _combined_loss(self, x, y, sample_weight, *, training: bool):
         y_pred = self(x, training=training)
-        bag_loss = self.compiled_loss(
-            y, y_pred, regularization_losses=self.losses
+        bag_loss = self.compute_loss(
+            x=x, y=y, y_pred=y_pred, sample_weight=sample_weight
         )
         inst_loss = self._clam_layer().compute_instance_loss(y)
         total = (
@@ -242,14 +244,16 @@ class CLAMTrainingModel(keras.Model):
         x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
         with tf.GradientTape() as tape:
             total_loss, bag_loss, inst_loss, y_pred = self._combined_loss(
-                x, y, training=True
+                x, y, sample_weight, training=True
             )
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(total_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-        self.compute_metrics(x, y, y_pred, sample_weight=sample_weight)
+        metric_results = self.compute_metrics(
+            x, y, y_pred, sample_weight=sample_weight
+        )
         return {
-            **{metric.name: metric.result() for metric in self.metrics},
+            **metric_results,
             "loss": total_loss,
             "bag_loss": bag_loss,
             "instance_loss": inst_loss,
@@ -258,11 +262,13 @@ class CLAMTrainingModel(keras.Model):
     def test_step(self, data):
         x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
         total_loss, bag_loss, inst_loss, y_pred = self._combined_loss(
-            x, y, training=False
+            x, y, sample_weight, training=False
         )
-        self.compute_metrics(x, y, y_pred, sample_weight=sample_weight)
+        metric_results = self.compute_metrics(
+            x, y, y_pred, sample_weight=sample_weight
+        )
         return {
-            **{metric.name: metric.result() for metric in self.metrics},
+            **metric_results,
             "loss": total_loss,
             "bag_loss": bag_loss,
             "instance_loss": inst_loss,
