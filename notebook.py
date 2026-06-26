@@ -70,6 +70,38 @@ def _enable_autoreload(shell) -> None:
     shell.run_line_magic("autoreload", "2")
 
 
+def _install_comet_if_missing() -> None:
+    if importlib.util.find_spec("comet_ml") is not None:
+        return
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "--disable-pip-version-check",
+        "comet_ml",
+    ]
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Falló la instalación de comet_ml.\n\n"
+            f"Comando:\n{' '.join(cmd)}\n\n"
+            f"Error de pip:\n{result.stderr}"
+        )
+
+
+def _ensure_comet() -> None:
+    """Comet ML debe importarse antes que TensorFlow para instrumentar Keras."""
+    import comet_ml  # noqa: F401
+
+
 def configure_notebook(
     autoreload: bool = True,
     disable_bytecode: bool = True,
@@ -77,7 +109,12 @@ def configure_notebook(
     install_requirements: bool = True,
     skip_requirements_in_colab: bool = True,
     mixed_precision_policy: str | None = "mixed_float16",
+    install_comet: bool = True,
 ) -> None:
+    if install_comet:
+        _install_comet_if_missing()
+    _ensure_comet()
+
     os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
     os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
     os.environ.setdefault("TF_CUDNN_USE_AUTOTUNE", "1")

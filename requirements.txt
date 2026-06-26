@@ -6,3 +6,4 @@ crcmod
 gsutil
 scikit-learn
 gdown>=5.1
+comet_ml

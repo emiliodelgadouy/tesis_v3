@@ -161,10 +161,15 @@ class ModelBuilder:
         self.backbone.trainable = backbone_trainable
         self.input_shape = backbone.input_shape[1:3]
         self.aggressive_augmentation = bool(aggressive_augmentation)
-        self.bag_size = int(bag_size) if bag_size is not None else None
+        self.bag_grid = (int(bag_grid[0]), int(bag_grid[1]))
+        if bag_size is not None:
+            self.bag_size = int(bag_size)
+        elif is_mil_mode(self.mode):
+            self.bag_size = self.bag_grid[0] * self.bag_grid[1]
+        else:
+            self.bag_size = None
         self.attention_dim = int(attention_dim)
         self.attention_gated = bool(attention_gated)
-        self.bag_grid = (int(bag_grid[0]), int(bag_grid[1]))
         self.bag_keras_tiling = bool(bag_keras_tiling)
         self.clam_k_sample = int(clam_k_sample)
         self.clam_bag_loss_weight = float(clam_bag_loss_weight)

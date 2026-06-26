@@ -6,25 +6,40 @@ from typing import Literal
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_curve
+import tensorflow as tf
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    average_precision_score,
+    confusion_matrix,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
 from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS
-from src.dataset_provider import apply_clahe_tf, decode_image
+from src.dataset_provider import apply_clahe_tf, as_tf_dataset, decode_image
 
 __all__ = [
     "EpochTimer",
     "apply_clahe_tf",
     "apply_probability_threshold",
+    "binary_report",
     "decode_image",
     "deduplicate_images",
     "labels_from_tf_dataset",
     "logit_initial_bias",
     "plot_binary_confusion_matrix",
     "predict_probabilities",
+    "predict_probabilities_tta",
     "stratified_split",
+    "threshold_best_f1",
     "threshold_max_recall",
+    "threshold_recall_target",
+    "threshold_youden_j",
+    "undersample_negatives",
+    "warmup",
 ]
 
 
@@ -176,6 +191,100 @@ def threshold_max_recall(y_true, y_prob) -> tuple[float, float]:
     candidate_idx = np.flatnonzero(recalls_t == max_recall)
     best_i = int(candidate_idx[np.argmax(precisions_t[candidate_idx])])
     return float(thresholds[best_i]), max_recall
+
+
+def undersample_negatives(
+    df: pd.DataFrame,
+    *,
+    ratio: int = 3,
+    seed: int = 42,
+    label_column: str = "cls",
+) -> pd.DataFrame:
+    """Submuestrea negativos a `ratio`:1 respecto de los positivos. Solo para train."""
+    pos = df[df[label_column] >= 0.5]
+    neg = df[df[label_column] < 0.5]
+    n_neg = min(len(neg), len(pos) * ratio)
+    neg = neg.sample(n=n_neg, random_state=seed)
+    out = pd.concat([pos, neg], ignore_index=True)
+    return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
+def predict_probabilities_tta(model, dataset) -> np.ndarray:
+    """TTA por flip horizontal: promedia probabilidades de imagen normal + espejada."""
+    base = as_tf_dataset(dataset)
+    flipped = base.map(
+        lambda x, y: (tf.image.flip_left_right(x), y),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    p_base = _sigmoid(model.predict(base, verbose=0).reshape(-1))
+    p_flip = _sigmoid(model.predict(flipped, verbose=0).reshape(-1))
+    return (p_base + p_flip) / 2.0
+
+
+def threshold_youden_j(y_true, y_prob) -> float:
+    """Umbral que maximiza el indice J de Youden (sensibilidad + especificidad - 1)."""
+    fpr, tpr, thr = roc_curve(y_true, y_prob)
+    best = int(np.argmax(tpr - fpr))
+    return float(thr[best])
+
+
+def threshold_best_f1(y_true, y_prob) -> float:
+    """Umbral que maximiza F1 sobre la clase positiva."""
+    precision, recall, thr = precision_recall_curve(y_true, y_prob)
+    f1 = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-12)
+    best = int(np.argmax(f1))
+    return float(thr[best])
+
+
+def threshold_recall_target(y_true, y_prob, target_recall: float = 0.90) -> float:
+    """Umbral mas alto (mayor precision) que aun garantiza recall >= target_recall."""
+    precision, recall, thr = precision_recall_curve(y_true, y_prob)
+    recall_t, precision_t = recall[:-1], precision[:-1]
+    ok = np.flatnonzero(recall_t >= target_recall)
+    if ok.size == 0:
+        return threshold_best_f1(y_true, y_prob)
+    best = int(ok[np.argmax(precision_t[ok])])
+    return float(thr[best])
+
+
+def binary_report(y_true, y_prob, threshold: float, *, title: str = "") -> dict:
+    """Imprime metricas clinicas (sensibilidad, especificidad, PPV, NPV, F1) a un umbral."""
+    y_true = np.asarray(y_true).astype(int).reshape(-1)
+    y_pred = (np.asarray(y_prob) >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    sensitivity = tp / (tp + fn) if (tp + fn) else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) else 0.0
+    ppv = tp / (tp + fp) if (tp + fp) else 0.0
+    npv = tn / (tn + fn) if (tn + fn) else 0.0
+    f1 = 2 * ppv * sensitivity / (ppv + sensitivity) if (ppv + sensitivity) else 0.0
+    balanced_acc = (sensitivity + specificity) / 2.0
+    print(f"== {title} (umbral={threshold:.4f}) ==")
+    print(f"  ROC-AUC ........ {roc_auc_score(y_true, y_prob):.4f}")
+    print(f"  PR-AUC ......... {average_precision_score(y_true, y_prob):.4f}")
+    print(f"  Sensibilidad ... {sensitivity:.4f}  (recall+)")
+    print(f"  Especificidad .. {specificity:.4f}")
+    print(f"  PPV (prec+) .... {ppv:.4f}")
+    print(f"  NPV ............ {npv:.4f}")
+    print(f"  F1 ............. {f1:.4f}")
+    print(f"  Balanced acc ... {balanced_acc:.4f}")
+    print(f"  Matriz [tn fp / fn tp]: [{tn} {fp} / {fn} {tp}]\n")
+    return {
+        "threshold": threshold,
+        "sensitivity": sensitivity,
+        "specificity": specificity,
+        "ppv": ppv,
+        "npv": npv,
+        "f1": f1,
+        "balanced_accuracy": balanced_acc,
+    }
+
+
+def warmup(model, train_ds) -> None:
+    """Un step dummy para disparar la compilacion del grafo antes de model.fit()."""
+    t0 = time.perf_counter()
+    xb, yb = next(iter(as_tf_dataset(train_ds)))
+    model.model.train_on_batch(xb, yb)
+    print(f"  Warm-up completado en {time.perf_counter() - t0:.1f}s")
 
 
 class EpochTimer(keras.callbacks.Callback):
