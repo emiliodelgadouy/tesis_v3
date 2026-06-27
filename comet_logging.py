@@ -115,6 +115,83 @@ def _bag_to_montage(bag: np.ndarray) -> np.ndarray:
     return canvas
 
 
+def _prepare_image_for_logging(img: np.ndarray) -> np.ndarray:
+    img = np.asarray(img)
+    if img.ndim == 4:
+        img = _bag_to_montage(img)
+    if img.dtype in (np.float16, np.float32, np.float64):
+        img = img / 255.0 if img.max() > 1.0 else img
+        img = np.clip(img.astype(np.float32), 0.0, 1.0)
+    return img
+
+
+def _prediction_group(y_true: int, y_pred: int) -> str:
+    if y_true == 1 and y_pred == 1:
+        return "TP"
+    if y_true == 0 and y_pred == 0:
+        return "TN"
+    if y_true == 0 and y_pred == 1:
+        return "FP"
+    return "FN"
+
+
+def _fixed_sample_indices(y_true: np.ndarray, *, n_samples: int, random_seed: int) -> list[int]:
+    """Muestras estables entre experimentos, balanceadas por etiqueta cuando se puede."""
+    if n_samples <= 0:
+        return []
+
+    groups = {
+        "neg": np.flatnonzero(y_true == 0),
+        "pos": np.flatnonzero(y_true == 1),
+    }
+    per_group = max(1, n_samples // len(groups))
+    picked: list[int] = []
+    for idxs in groups.values():
+        if idxs.size:
+            picked.extend(idxs[:per_group].tolist())
+
+    if len(picked) < n_samples:
+        remaining = [i for i in range(len(y_true)) if i not in picked]
+        extra = min(n_samples - len(picked), len(remaining))
+        if extra:
+            picked.extend(
+                np.random.default_rng(random_seed).choice(remaining, size=extra, replace=False).tolist()
+            )
+    return picked[:n_samples]
+
+
+def _prediction_sample_indices(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    n_samples: int,
+    random_seed: int,
+) -> list[int]:
+    """Muestras diagnosticas TP/TN/FP/FN; pueden cambiar entre modelos."""
+    if n_samples <= 0:
+        return []
+
+    groups = {
+        "TP": np.flatnonzero((y_true == 1) & (y_pred == 1)),
+        "TN": np.flatnonzero((y_true == 0) & (y_pred == 0)),
+        "FP": np.flatnonzero((y_true == 0) & (y_pred == 1)),
+        "FN": np.flatnonzero((y_true == 1) & (y_pred == 0)),
+    }
+    per_group = max(1, n_samples // len(groups))
+    picked: list[int] = []
+    for idxs in groups.values():
+        if idxs.size:
+            picked.extend(idxs[:per_group].tolist())
+    if len(picked) < n_samples:
+        remaining = [i for i in range(len(y_true)) if i not in picked]
+        extra = min(n_samples - len(picked), len(remaining))
+        if extra:
+            picked.extend(
+                np.random.default_rng(random_seed).choice(remaining, size=extra, replace=False).tolist()
+            )
+    return picked[:n_samples]
+
+
 def _sens_spec(y_true, y_prob, thr: float) -> tuple[float, float]:
     y_true = np.asarray(y_true).astype(int).reshape(-1)
     y_pred = (np.asarray(y_prob) >= thr).astype(int)
@@ -122,6 +199,54 @@ def _sens_spec(y_true, y_prob, thr: float) -> tuple[float, float]:
     sens = tp / (tp + fn) if (tp + fn) else 0.0
     spec = tn / (tn + fp) if (tn + fp) else 0.0
     return sens, spec
+
+
+def _plot_and_log_samples(
+    experiment,
+    images: np.ndarray,
+    y_true,
+    y_prob,
+    y_pred,
+    picked: list[int],
+    threshold: float,
+    *,
+    image_prefix: str,
+    figure_title: str,
+):
+    n_cols = min(4, max(1, len(picked)))
+    n_rows = int(np.ceil(len(picked) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.2 * n_cols, 3.2 * n_rows))
+    axes = np.atleast_1d(axes).reshape(-1)
+
+    for slot, (ax, idx) in enumerate(zip(axes, picked)):
+        img = _prepare_image_for_logging(images[idx])
+        group = _prediction_group(int(y_true[idx]), int(y_pred[idx]))
+        ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
+        ax.set_title(
+            f"{group} | idx={idx} | p={y_prob[idx]:.3f}",
+            fontsize=9,
+        )
+        ax.axis("off")
+        experiment.log_image(
+            img,
+            name=f"{image_prefix}/slot_{slot:02d}",
+            metadata={
+                "slot": int(slot),
+                "dataset_index": int(idx),
+                "group": group,
+                "y_true": int(y_true[idx]),
+                "prob": float(y_prob[idx]),
+                "pred": int(y_pred[idx]),
+                "threshold": float(threshold),
+            },
+        )
+
+    for ax in axes[len(picked) :]:
+        ax.axis("off")
+
+    fig.suptitle(f"{figure_title} — umbral Youden J = {threshold:.4f}", y=1.02)
+    plt.tight_layout()
+    return fig
 
 
 def _log_sample_predictions(
@@ -147,60 +272,36 @@ def _log_sample_predictions(
             f"Mismatch imagenes ({len(images)}) vs etiquetas ({len(y_true)}) al loguear muestras."
         )
 
-    groups = {
-        "TP": np.flatnonzero((y_true == 1) & (y_pred == 1)),
-        "TN": np.flatnonzero((y_true == 0) & (y_pred == 0)),
-        "FP": np.flatnonzero((y_true == 0) & (y_pred == 1)),
-        "FN": np.flatnonzero((y_true == 1) & (y_pred == 0)),
-    }
-    per_group = max(1, n_samples // len(groups))
-    picked: list[int] = []
-    for idxs in groups.values():
-        if idxs.size:
-            picked.extend(idxs[:per_group].tolist())
-    if len(picked) < n_samples:
-        remaining = [i for i in range(len(y_true)) if i not in picked]
-        extra = min(n_samples - len(picked), len(remaining))
-        if extra:
-            picked.extend(
-                np.random.default_rng(random_seed).choice(remaining, size=extra, replace=False).tolist()
-            )
-    picked = picked[:n_samples]
-
-    n_cols = min(4, max(1, len(picked)))
-    n_rows = int(np.ceil(len(picked) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.2 * n_cols, 3.2 * n_rows))
-    axes = np.atleast_1d(axes).reshape(-1)
-
-    for ax, idx in zip(axes, picked):
-        img = images[idx]
-        if img.ndim == 4:
-            img = _bag_to_montage(img)
-        if img.dtype in (np.float16, np.float32, np.float64):
-            img = img / 255.0 if img.max() > 1.0 else img
-            img = np.clip(img.astype(np.float32), 0.0, 1.0)
-        ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
-        ax.set_title(
-            f"y={y_true[idx]} | p={y_prob[idx]:.3f} | pred={y_pred[idx]}",
-            fontsize=9,
-        )
-        ax.axis("off")
-        experiment.log_image(
-            img,
-            name=f"samples/test_{idx:04d}",
-            metadata={
-                "y_true": int(y_true[idx]),
-                "prob": float(y_prob[idx]),
-                "pred": int(y_pred[idx]),
-            },
-        )
-
-    for ax in axes[len(picked) :]:
-        ax.axis("off")
-
-    fig.suptitle(f"Muestras test — umbral Youden J = {threshold:.4f}", y=1.02)
-    plt.tight_layout()
-    return fig
+    fixed_picked = _fixed_sample_indices(y_true, n_samples=n_samples, random_seed=random_seed)
+    outcome_picked = _prediction_sample_indices(
+        y_true,
+        y_pred,
+        n_samples=n_samples,
+        random_seed=random_seed,
+    )
+    fig_fixed = _plot_and_log_samples(
+        experiment,
+        images,
+        y_true,
+        y_prob,
+        y_pred,
+        fixed_picked,
+        threshold,
+        image_prefix="samples_fixed",
+        figure_title="Muestras test fijas",
+    )
+    fig_outcome = _plot_and_log_samples(
+        experiment,
+        images,
+        y_true,
+        y_prob,
+        y_pred,
+        outcome_picked,
+        threshold,
+        image_prefix="samples_by_outcome",
+        figure_title="Muestras test por resultado",
+    )
+    return fig_fixed, fig_outcome
 
 
 def log_test_results(
@@ -275,7 +376,7 @@ def log_test_results(
         plt.show()
     plt.close(fig)
 
-    fig_samples = _log_sample_predictions(
+    fig_samples_fixed, fig_samples_outcome = _log_sample_predictions(
         experiment,
         dataset,
         y_test_true,
@@ -284,10 +385,14 @@ def log_test_results(
         random_seed=random_seed,
         n_samples=n_sample_images,
     )
-    experiment.log_figure(figure_name="sample_predictions_test", figure=fig_samples)
+    experiment.log_figure(figure_name="sample_predictions_test_fixed", figure=fig_samples_fixed)
     if show_plots:
         plt.show()
-    plt.close(fig_samples)
+    plt.close(fig_samples_fixed)
+    experiment.log_figure(figure_name="sample_predictions_test_by_outcome", figure=fig_samples_outcome)
+    if show_plots:
+        plt.show()
+    plt.close(fig_samples_outcome)
 
     sens_y, spec_y = _sens_spec(y_test_true, y_test_prob, thr_youden)
     sens_r, spec_r = _sens_spec(y_test_true, y_test_prob, thr_recall90)
