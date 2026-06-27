@@ -601,18 +601,18 @@ class ModelBuilder:
             verbose=1,
         )
 
-    def callbacks(self):
+    def callbacks(self, training_timer=None):
         return [
             self.checkpoint_callback(),
             self.early_stopping_callback(),
             self.reduce_lr_callback(),
-            EpochTimer(),
+            EpochTimer(training_timer=training_timer),
         ]
 
-    def fit(self, train_ds, val_ds, epochs=5, callbacks=None):
+    def fit(self, train_ds, val_ds, epochs=5, callbacks=None, training_timer=None):
         self.fit_number += 1
         self.checkpoint_path = self.checkpoint_dir / f"stage_{self.fit_number}.weights.h5"
-        callbacks = self.callbacks() + list(callbacks or [])
+        callbacks = self.callbacks(training_timer=training_timer) + list(callbacks or [])
         return self.model.fit(
             as_tf_dataset(train_ds),
             validation_data=as_tf_dataset(val_ds),

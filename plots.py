@@ -53,7 +53,8 @@ def _stage_offsets(histories):
     offset = 0
     for history in histories:
         offsets.append(offset)
-        offset += len(next(iter(history.history.values())))
+        values = list(history.history.values())
+        offset += len(values[0]) if values else 0
     return offsets
 
 

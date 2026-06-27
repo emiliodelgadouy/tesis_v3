@@ -23,6 +23,8 @@ from src.dataset_provider import apply_clahe_tf, as_tf_dataset, decode_image
 
 __all__ = [
     "EpochTimer",
+    "TrainingTimer",
+    "run_training_stage",
     "apply_clahe_tf",
     "apply_probability_threshold",
     "binary_report",
@@ -279,28 +281,159 @@ def binary_report(y_true, y_prob, threshold: float, *, title: str = "") -> dict:
     }
 
 
-def warmup(model, train_ds) -> None:
+def warmup(model, train_ds) -> float:
     """Un step dummy para disparar la compilacion del grafo antes de model.fit()."""
     t0 = time.perf_counter()
     xb, yb = next(iter(as_tf_dataset(train_ds)))
     model.model.train_on_batch(xb, yb)
-    print(f"  Warm-up completado en {time.perf_counter() - t0:.1f}s")
+    elapsed = time.perf_counter() - t0
+    print(f"  Warm-up completado en {elapsed:.1f}s")
+    return elapsed
+
+
+class TrainingTimer:
+    """Wall-clock compartido entre las fases de entrenamiento multi-etapa."""
+
+    def __init__(self) -> None:
+        self._training_start: float | None = None
+        self._stage_start: float | None = None
+        self.current_stage: int | None = None
+        self.stage_summaries: dict[int, dict[str, float]] = {}
+
+    def start_training(self) -> None:
+        self._training_start = time.perf_counter()
+
+    def start_stage(self, stage: int) -> None:
+        self.current_stage = stage
+        self._stage_start = time.perf_counter()
+
+    def elapsed_since_training_start(self) -> float:
+        if self._training_start is None:
+            return 0.0
+        return time.perf_counter() - self._training_start
+
+    def elapsed_since_stage_start(self) -> float:
+        if self._stage_start is None:
+            return 0.0
+        return time.perf_counter() - self._stage_start
+
+    def record_stage_summary(
+        self,
+        stage: int,
+        *,
+        setup_seconds: float,
+        warmup_seconds: float,
+        fit_seconds: float,
+        checkpoint_seconds: float,
+    ) -> dict[str, float]:
+        summary = {
+            "setup_seconds": setup_seconds,
+            "warmup_seconds": warmup_seconds,
+            "fit_seconds": fit_seconds,
+            "checkpoint_seconds": checkpoint_seconds,
+            "stage_wall_seconds": self.elapsed_since_stage_start(),
+        }
+        self.stage_summaries[stage] = summary
+        return summary
 
 
 class EpochTimer(keras.callbacks.Callback):
+    def __init__(self, training_timer: TrainingTimer | None = None):
+        super().__init__()
+        self.training_timer = training_timer
+
     def on_train_begin(self, logs=None):
         self.epoch_times = []
-        self.total_elapsed_times = []
+        self.fit_elapsed_times = []
         self._fit_start = time.perf_counter()
 
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_start_time = time.perf_counter()
 
     def on_epoch_end(self, epoch, logs=None):
-        elapsed = time.perf_counter() - self.epoch_start_time
-        self.epoch_times.append(elapsed)
-        total = time.perf_counter() - self._fit_start
-        self.total_elapsed_times.append(total)
-        if logs is not None:
-            logs["epoch_time_seconds"] = elapsed
-            logs["total_elapsed_seconds"] = total
+        epoch_wall = time.perf_counter() - self.epoch_start_time
+        fit_elapsed = time.perf_counter() - self._fit_start
+        self.epoch_times.append(epoch_wall)
+        self.fit_elapsed_times.append(fit_elapsed)
+        if logs is None:
+            return
+
+        logs["epoch_wall_seconds"] = epoch_wall
+        logs["epoch_time_seconds"] = epoch_wall
+        logs["fit_elapsed_seconds"] = fit_elapsed
+        logs["total_elapsed_seconds"] = fit_elapsed
+        if self.training_timer is not None:
+            logs["global_elapsed_seconds"] = self.training_timer.elapsed_since_training_start()
+            logs["stage_elapsed_seconds"] = self.training_timer.elapsed_since_stage_start()
+
+
+def run_training_stage(
+    model,
+    train_ds,
+    val_ds,
+    *,
+    stage: int,
+    epochs: int,
+    training_timer: TrainingTimer,
+    epoch_offset: int = 0,
+    experiment=None,
+    extra_callbacks=None,
+    setup_fn=None,
+):
+    """Ejecuta una etapa de congelamiento con metricas de tiempo reales (wall-clock)."""
+    from src.comet_logging import CometEpochLogger, log_stage_timing
+
+    if epochs <= 0:
+        empty_history = keras.callbacks.History()
+        empty_history.history = {}
+        print(f"  Etapa {stage}: omitida (epochs=0)")
+        return empty_history, None, None
+
+    training_timer.start_stage(stage)
+
+    setup_seconds = 0.0
+    if setup_fn is not None:
+        t0 = time.perf_counter()
+        setup_fn()
+        setup_seconds = time.perf_counter() - t0
+
+    warmup_seconds = warmup(model, train_ds)
+
+    fit_t0 = time.perf_counter()
+    callbacks = list(extra_callbacks or [])
+    if experiment is not None:
+        callbacks.insert(
+            0,
+            CometEpochLogger(experiment, epoch_offset=epoch_offset, stage=stage),
+        )
+    history = model.fit(
+        train_ds,
+        val_ds,
+        epochs=epochs,
+        callbacks=callbacks,
+        training_timer=training_timer,
+    )
+    fit_seconds = time.perf_counter() - fit_t0
+
+    ckpt_t0 = time.perf_counter()
+    best_epoch = model.load_best_checkpoint()
+    checkpoint_seconds = time.perf_counter() - ckpt_t0
+
+    summary = training_timer.record_stage_summary(
+        stage,
+        setup_seconds=setup_seconds,
+        warmup_seconds=warmup_seconds,
+        fit_seconds=fit_seconds,
+        checkpoint_seconds=checkpoint_seconds,
+    )
+    epochs_completed = len(history.history.get("loss", []))
+    global_epoch = epoch_offset + epochs_completed
+    if experiment is not None:
+        log_stage_timing(experiment, stage, summary, step=global_epoch)
+
+    print(
+        f"  Etapa {stage}: {summary['stage_wall_seconds']:.1f}s total "
+        f"(setup={setup_seconds:.1f}s, warmup={warmup_seconds:.1f}s, "
+        f"fit={fit_seconds:.1f}s, checkpoint={checkpoint_seconds:.1f}s)"
+    )
+    return history, best_epoch, summary

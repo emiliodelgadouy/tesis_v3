@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 from typing import Any
 
 import comet_ml
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     average_precision_score,
@@ -19,12 +22,13 @@ from sklearn.metrics import (
 from tensorflow import keras
 
 from src.dataset_provider import as_tf_dataset
-from src.utils import apply_probability_threshold
 
 # Defaults; el notebook puede sobreescribir COMET_* y pasarlos a login()/start_training_experiment().
 COMET_API_KEY = os.environ.get("COMET_API_KEY", "")
 COMET_PROJECT = "tesis-reni"
 COMET_N_SAMPLE_IMAGES = 8
+# Comet rechaza nombres de imagen/figura con mas de 100 caracteres.
+COMET_MAX_IMAGE_NAME_LEN = 100
 
 
 def login(*, api_key: str | None = None) -> None:
@@ -64,12 +68,31 @@ class CometEpochLogger(keras.callbacks.Callback):
         self.experiment.log_metrics(metrics, step=global_epoch, epoch=global_epoch)
 
 
+def log_stage_timing(experiment, stage: int, summary: dict[str, float], *, step: int) -> None:
+    """Loguea el desglose wall-clock de una etapa de entrenamiento."""
+    experiment.log_metrics(
+        {f"stage_{stage}_{key}": float(value) for key, value in summary.items()},
+        step=step,
+        epoch=step,
+    )
+
+
+def log_training_timing_summary(experiment, training_timer) -> None:
+    """Loguea tiempos totales y por etapa al finalizar el entrenamiento."""
+    total_seconds = training_timer.elapsed_since_training_start()
+    metrics = {"training_wall_seconds": total_seconds}
+    for stage, summary in training_timer.stage_summaries.items():
+        metrics[f"stage_{stage}_wall_seconds"] = summary["stage_wall_seconds"]
+    experiment.log_metrics(metrics)
+
+
 def start_training_experiment(
     *,
     experiment_name: str,
     run_config: dict[str, Any],
     backbone_description: str,
     architecture_catalog: str,
+    model=None,
     project_name: str = COMET_PROJECT,
 ):
     experiment = comet_ml.start(
@@ -84,8 +107,11 @@ def start_training_experiment(
     experiment.set_step(0)
     experiment.set_epoch(0)
     experiment.log_parameters(run_config)
+    experiment.log_metric("n_hyperparameters", len(run_config))
     experiment.log_other("backbone_description", backbone_description)
     experiment.log_asset_data(architecture_catalog, "catalogo_arquitecturas.txt")
+    if model is not None:
+        experiment.set_model_graph(model)
     return experiment
 
 
@@ -116,23 +142,14 @@ def _bag_to_montage(bag: np.ndarray) -> np.ndarray:
 
 
 def _prepare_image_for_logging(img: np.ndarray) -> np.ndarray:
+    """Devuelve float32 en [0, 1] listo para imshow."""
     img = np.asarray(img)
     if img.ndim == 4:
         img = _bag_to_montage(img)
-    if img.dtype in (np.float16, np.float32, np.float64):
-        img = img / 255.0 if img.max() > 1.0 else img
-        img = np.clip(img.astype(np.float32), 0.0, 1.0)
-    return img
-
-
-def _prediction_group(y_true: int, y_pred: int) -> str:
-    if y_true == 1 and y_pred == 1:
-        return "TP"
-    if y_true == 0 and y_pred == 0:
-        return "TN"
-    if y_true == 0 and y_pred == 1:
-        return "FP"
-    return "FN"
+    arr = img.astype(np.float32)
+    if arr.max() > 1.0:
+        arr = arr / 255.0
+    return np.clip(arr, 0.0, 1.0)
 
 
 def _fixed_sample_indices(y_true: np.ndarray, *, n_samples: int, random_seed: int) -> list[int]:
@@ -160,38 +177,6 @@ def _fixed_sample_indices(y_true: np.ndarray, *, n_samples: int, random_seed: in
     return picked[:n_samples]
 
 
-def _prediction_sample_indices(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    *,
-    n_samples: int,
-    random_seed: int,
-) -> list[int]:
-    """Muestras diagnosticas TP/TN/FP/FN; pueden cambiar entre modelos."""
-    if n_samples <= 0:
-        return []
-
-    groups = {
-        "TP": np.flatnonzero((y_true == 1) & (y_pred == 1)),
-        "TN": np.flatnonzero((y_true == 0) & (y_pred == 0)),
-        "FP": np.flatnonzero((y_true == 0) & (y_pred == 1)),
-        "FN": np.flatnonzero((y_true == 1) & (y_pred == 0)),
-    }
-    per_group = max(1, n_samples // len(groups))
-    picked: list[int] = []
-    for idxs in groups.values():
-        if idxs.size:
-            picked.extend(idxs[:per_group].tolist())
-    if len(picked) < n_samples:
-        remaining = [i for i in range(len(y_true)) if i not in picked]
-        extra = min(n_samples - len(picked), len(remaining))
-        if extra:
-            picked.extend(
-                np.random.default_rng(random_seed).choice(remaining, size=extra, replace=False).tolist()
-            )
-    return picked[:n_samples]
-
-
 def _sens_spec(y_true, y_prob, thr: float) -> tuple[float, float]:
     y_true = np.asarray(y_true).astype(int).reshape(-1)
     y_pred = (np.asarray(y_prob) >= thr).astype(int)
@@ -201,107 +186,182 @@ def _sens_spec(y_true, y_prob, thr: float) -> tuple[float, float]:
     return sens, spec
 
 
-def _plot_and_log_samples(
-    experiment,
-    images: np.ndarray,
-    y_true,
-    y_prob,
-    y_pred,
-    picked: list[int],
-    threshold: float,
+def _log_final_weights(experiment, *, backbone_name: str, final_weights_path) -> None:
+    weights_path = Path(final_weights_path)
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"No existe el archivo de pesos final: {weights_path}")
+
+    model_name = f"{backbone_name}_final_weights"
+    try:
+        experiment.log_model(name=model_name, file_or_folder=str(weights_path))
+    except TypeError:
+        experiment.log_model(model_name, str(weights_path))
+    experiment.log_other("final_weights_file", weights_path.name)
+
+
+def _comet_slug(value: str) -> str:
+    slug = re.sub(r"[^\w.\-]+", "_", str(value).strip())
+    return slug.strip("_") or "unknown"
+
+
+def _resolve_experiment_name(experiment, experiment_name: str | None) -> str:
+    if experiment_name:
+        return _comet_slug(experiment_name)
+    for attr in ("get_name", "name"):
+        if hasattr(experiment, attr):
+            val = getattr(experiment, attr)
+            if callable(val):
+                val = val()
+            if val:
+                return _comet_slug(val)
+    return "experiment"
+
+
+def _input_sample_name(
     *,
-    image_prefix: str,
-    figure_title: str,
-):
-    n_cols = min(4, max(1, len(picked)))
-    n_rows = int(np.ceil(len(picked) / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.2 * n_cols, 3.2 * n_rows))
-    axes = np.atleast_1d(axes).reshape(-1)
+    experiment_name: str,
+    split_name: str,
+    dataset_idx: int,
+    label: int,
+    row: Any | None,
+    max_len: int = COMET_MAX_IMAGE_NAME_LEN,
+) -> str:
+    prefix_parts = [experiment_name, "pre_augment", _comet_slug(split_name)]
+    id_segment: str | None = None
+    if row is not None:
+        id_parts: list[str] = []
+        for col in ("patient_id", "image_id"):
+            if col in row.index and pd.notna(row[col]):
+                id_parts.append(_comet_slug(row[col]))
+        if id_parts:
+            id_segment = "__".join(id_parts)
+        elif "path" in row.index and pd.notna(row["path"]):
+            id_segment = _comet_slug(Path(str(row["path"])).stem)
 
-    for slot, (ax, idx) in enumerate(zip(axes, picked)):
-        img = _prepare_image_for_logging(images[idx])
-        group = _prediction_group(int(y_true[idx]), int(y_pred[idx]))
-        ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
-        ax.set_title(
-            f"{group} | idx={idx} | p={y_prob[idx]:.3f}",
-            fontsize=9,
+    # idx siempre presente -> garantiza unicidad aunque haya que recortar id_segment.
+    suffix_parts = [f"idx{dataset_idx:04d}", f"label{label}"]
+    fixed = "/".join(prefix_parts + suffix_parts)
+    if id_segment is None:
+        return fixed[:max_len]
+
+    # Espacio disponible para el id_segment respetando el limite de Comet (+1 por el "/").
+    available = max_len - len(fixed) - 1
+    if available <= 0:
+        return fixed[:max_len]
+    if len(id_segment) > available:
+        id_segment = id_segment[:available]
+    return "/".join(prefix_parts + [id_segment] + suffix_parts)
+
+
+def _collect_dataset_images_labels(dataset) -> tuple[np.ndarray, np.ndarray]:
+    """Lee imagenes/etiquetas en orden estable (pre-augmentacion del tf.data)."""
+    if hasattr(dataset, "ordered"):
+        source = dataset.ordered()
+    else:
+        source = as_tf_dataset(dataset)
+
+    images_batches: list[np.ndarray] = []
+    labels_batches: list[np.ndarray] = []
+    for images_batch, labels_batch in source:
+        images_batches.append(np.asarray(images_batch))
+        labels_batches.append(np.asarray(labels_batch).reshape(-1))
+
+    if not images_batches:
+        raise ValueError("El dataset no produjo batches al loguear muestras de entrada.")
+
+    images = np.concatenate(images_batches, axis=0)
+    labels = np.concatenate(labels_batches, axis=0).astype(int).reshape(-1)
+    if len(images) != len(labels):
+        raise ValueError(
+            f"Mismatch imagenes ({len(images)}) vs etiquetas ({len(labels)}) al loguear muestras."
         )
-        ax.axis("off")
-        experiment.log_image(
-            img,
-            name=f"{image_prefix}/slot_{slot:02d}",
-            metadata={
-                "slot": int(slot),
-                "dataset_index": int(idx),
-                "group": group,
-                "y_true": int(y_true[idx]),
-                "prob": float(y_prob[idx]),
-                "pred": int(y_pred[idx]),
-                "threshold": float(threshold),
-            },
-        )
-
-    for ax in axes[len(picked) :]:
-        ax.axis("off")
-
-    fig.suptitle(f"{figure_title} — umbral Youden J = {threshold:.4f}", y=1.02)
-    plt.tight_layout()
-    return fig
+    return images, labels
 
 
-def _log_sample_predictions(
+def _array_to_pil_rgb(arr: np.ndarray):
+    from PIL import Image
+
+    normalized = _prepare_image_for_logging(arr)
+    if normalized.ndim == 2:
+        normalized = np.stack([normalized, normalized, normalized], axis=-1)
+    elif normalized.shape[-1] == 1:
+        normalized = np.repeat(normalized, 3, axis=-1)
+    rgb_u8 = (np.clip(normalized, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return Image.fromarray(rgb_u8, mode="RGB")
+
+
+def _sample_metadata(
+    *,
+    experiment_name: str,
+    split_name: str,
+    dataset_idx: int,
+    label: int,
+    row: Any | None,
+    image_shape: tuple[int, ...],
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "experiment_name": experiment_name,
+        "split": split_name,
+        "dataset_idx": int(dataset_idx),
+        "label": int(label),
+        "image_shape": [int(dim) for dim in image_shape],
+    }
+    if row is None:
+        return metadata
+    for col in ("patient_id", "image_id", "laterality", "view", "path"):
+        if col in row.index and pd.notna(row[col]):
+            metadata[col] = str(row[col])
+    return metadata
+
+
+def log_deterministic_input_samples(
     experiment,
     dataset,
-    y_true,
-    y_prob,
-    threshold: float,
     *,
+    experiment_name: str | None = None,
     random_seed: int,
     n_samples: int = COMET_N_SAMPLE_IMAGES,
-):
-    y_true = np.asarray(y_true).astype(int).reshape(-1)
-    y_prob = np.asarray(y_prob, dtype=np.float64).reshape(-1)
-    y_pred = apply_probability_threshold(y_prob, threshold)
+    split_name: str = "train",
+) -> None:
+    """Loguea a Comet imagenes individuales post-resize / pre-augmentacion."""
+    if n_samples <= 0:
+        return
 
-    images = np.concatenate(
-        [np.asarray(x_batch) for x_batch, _ in as_tf_dataset(dataset)],
-        axis=0,
-    )
-    if len(images) != len(y_true):
-        raise ValueError(
-            f"Mismatch imagenes ({len(images)}) vs etiquetas ({len(y_true)}) al loguear muestras."
+    images, y_true = _collect_dataset_images_labels(dataset)
+    picked = _fixed_sample_indices(y_true, n_samples=n_samples, random_seed=random_seed)
+    if not picked:
+        return
+
+    exp_name = _resolve_experiment_name(experiment, experiment_name)
+    source_table = getattr(dataset, "source_table", None)
+    if source_table is not None:
+        source_table = source_table.reset_index(drop=True)
+
+    for slot, idx in enumerate(picked):
+        label = int(y_true[idx] >= 0.5)
+        row = source_table.iloc[idx] if source_table is not None and idx < len(source_table) else None
+        name = _input_sample_name(
+            experiment_name=exp_name,
+            split_name=split_name,
+            dataset_idx=idx,
+            label=label,
+            row=row,
         )
-
-    fixed_picked = _fixed_sample_indices(y_true, n_samples=n_samples, random_seed=random_seed)
-    outcome_picked = _prediction_sample_indices(
-        y_true,
-        y_pred,
-        n_samples=n_samples,
-        random_seed=random_seed,
-    )
-    fig_fixed = _plot_and_log_samples(
-        experiment,
-        images,
-        y_true,
-        y_prob,
-        y_pred,
-        fixed_picked,
-        threshold,
-        image_prefix="samples_fixed",
-        figure_title="Muestras test fijas",
-    )
-    fig_outcome = _plot_and_log_samples(
-        experiment,
-        images,
-        y_true,
-        y_prob,
-        y_pred,
-        outcome_picked,
-        threshold,
-        image_prefix="samples_by_outcome",
-        figure_title="Muestras test por resultado",
-    )
-    return fig_fixed, fig_outcome
+        pil_image = _array_to_pil_rgb(images[idx])
+        metadata = _sample_metadata(
+            experiment_name=exp_name,
+            split_name=split_name,
+            dataset_idx=idx,
+            label=label,
+            row=row,
+            image_shape=tuple(int(dim) for dim in np.asarray(images[idx]).shape),
+        )
+        metadata["sample_slot"] = int(slot)
+        experiment.log_image(
+            image_data=pil_image,
+            name=name,
+            metadata=metadata,
+        )
 
 
 def log_test_results(
@@ -319,6 +379,7 @@ def log_test_results(
     best_val_metric: float,
     random_seed: int,
     n_sample_images: int = COMET_N_SAMPLE_IMAGES,
+    final_weights_path=None,
     show_plots: bool = True,
 ) -> str:
     experiment.log_confusion_matrix(
@@ -358,7 +419,12 @@ def log_test_results(
 
     fpr, tpr, _ = roc_curve(y_test_true, y_test_prob)
     prec, rec, _ = precision_recall_curve(y_test_true, y_test_prob)
-    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(11, 4))
+
+    # Curvas nativas de Comet: interactivas y comparables entre experimentos.
+    experiment.log_curve("roc", x=fpr.tolist(), y=tpr.tolist())
+    experiment.log_curve("pr", x=rec.tolist(), y=prec.tolist())
+
+    fig_roc_pr, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(11, 4))
     ax_roc.plot(fpr, tpr, label=f"AUC = {roc_auc_score(y_test_true, y_test_prob):.3f}")
     ax_roc.plot([0, 1], [0, 1], "--", color="gray")
     ax_roc.set_xlabel("1 - Especificidad (FPR)")
@@ -371,28 +437,10 @@ def log_test_results(
     ax_pr.set_title("Precision-Recall — Test")
     ax_pr.legend(loc="upper right")
     plt.tight_layout()
-    experiment.log_figure(figure_name="roc_pr_curves_test", figure=fig)
+    experiment.log_figure(figure_name="roc_pr_curves_test", figure=fig_roc_pr)
     if show_plots:
         plt.show()
-    plt.close(fig)
-
-    fig_samples_fixed, fig_samples_outcome = _log_sample_predictions(
-        experiment,
-        dataset,
-        y_test_true,
-        y_test_prob,
-        thr_youden,
-        random_seed=random_seed,
-        n_samples=n_sample_images,
-    )
-    experiment.log_figure(figure_name="sample_predictions_test_fixed", figure=fig_samples_fixed)
-    if show_plots:
-        plt.show()
-    plt.close(fig_samples_fixed)
-    experiment.log_figure(figure_name="sample_predictions_test_by_outcome", figure=fig_samples_outcome)
-    if show_plots:
-        plt.show()
-    plt.close(fig_samples_outcome)
+    plt.close(fig_roc_pr)
 
     sens_y, spec_y = _sens_spec(y_test_true, y_test_prob, thr_youden)
     sens_r, spec_r = _sens_spec(y_test_true, y_test_prob, thr_recall90)
@@ -412,6 +460,13 @@ def log_test_results(
             "spec_recall90": round(float(spec_r), 4),
         }
     )
+
+    if final_weights_path is not None:
+        _log_final_weights(
+            experiment,
+            backbone_name=backbone_name,
+            final_weights_path=final_weights_path,
+        )
 
     url = experiment.url
     experiment.end()

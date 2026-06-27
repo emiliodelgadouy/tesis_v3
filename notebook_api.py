@@ -25,7 +25,10 @@ from src.backbone_provider import (
 )
 from src.comet_logging import (
     CometEpochLogger,
+    log_deterministic_input_samples,
+    log_stage_timing,
     log_test_results,
+    log_training_timing_summary,
     login,
     start_training_experiment,
 )
@@ -35,6 +38,7 @@ from src.imports import get_device, set_seed
 from src.model_builder import ModelBuilder
 from src.plots import plot_history
 from src.utils import (
+    TrainingTimer,
     apply_probability_threshold,
     binary_report,
     deduplicate_images,
@@ -43,6 +47,7 @@ from src.utils import (
     plot_binary_confusion_matrix,
     predict_probabilities,
     predict_probabilities_tta,
+    run_training_stage,
     stratified_split,
     threshold_best_f1,
     threshold_max_recall,
@@ -63,7 +68,10 @@ __all__ = [
     "resolve_backbone",
     # comet_logging
     "CometEpochLogger",
+    "log_deterministic_input_samples",
+    "log_stage_timing",
     "log_test_results",
+    "log_training_timing_summary",
     "login",
     "start_training_experiment",
     # dataset / dataset_provider
@@ -78,6 +86,7 @@ __all__ = [
     # plots
     "plot_history",
     # utils
+    "TrainingTimer",
     "apply_probability_threshold",
     "binary_report",
     "deduplicate_images",
@@ -86,6 +95,7 @@ __all__ = [
     "plot_binary_confusion_matrix",
     "predict_probabilities",
     "predict_probabilities_tta",
+    "run_training_stage",
     "stratified_split",
     "threshold_best_f1",
     "threshold_max_recall",
