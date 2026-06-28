@@ -107,12 +107,21 @@ def start_training_experiment(
     experiment.set_step(0)
     experiment.set_epoch(0)
     experiment.log_parameters(run_config)
-    experiment.log_metric("n_hyperparameters", len(run_config))
     experiment.log_other("backbone_description", backbone_description)
     experiment.log_asset_data(architecture_catalog, "catalogo_arquitecturas.txt")
     if model is not None:
         experiment.set_model_graph(model)
+        _log_model_param_counts(experiment, model)
     return experiment
+
+
+def _log_model_param_counts(experiment, model) -> None:
+    """Loguea la cantidad de parametros del modelo (totales, entrenables y no entrenables)."""
+    trainable = int(sum(np.prod(w.shape) for w in model.trainable_weights))
+    non_trainable = int(sum(np.prod(w.shape) for w in model.non_trainable_weights))
+    experiment.log_metric("model_total_params", trainable + non_trainable)
+    experiment.log_metric("model_trainable_params", trainable)
+    experiment.log_metric("model_non_trainable_params", non_trainable)
 
 
 def _plot_confusion_matrix(y_true, y_pred, *, title: str):
