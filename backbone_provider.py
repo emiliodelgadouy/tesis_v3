@@ -797,11 +797,14 @@ def build_backbone(
     if weights is _DEFAULT_WEIGHTS:
         weights = config.default_weights
     height, width = config.input_size
+    # NB: no forzamos `name=config.name`. Las aplicaciones EfficientNetV2 de Keras
+    # reutilizan el argumento `name` como clave de DEFAULT_BLOCKS_ARGS (espera
+    # "efficientnetv2-b0"), por lo que un nombre normalizado dispara un KeyError.
+    # Los backbones propios ya usan por defecto exactamente config.name.
     return config.model_fn(
         weights=weights,
         include_top=include_top,
         input_shape=input_shape or (height, width, 3),
-        name=config.name,
         **kwargs,
     )
 
