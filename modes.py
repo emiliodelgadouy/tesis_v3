@@ -1,18 +1,22 @@
-"""Modos de entrenamiento: SIMPLE | ABMIL | CLAM."""
+"""Modos de entrenamiento: SIMPLE | ABMIL | CLAM | HIGHRES."""
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "clam", "native")
+TRAINING_MODES = ("simple", "abmil", "clam", "highres")
+
+# Entrada fija para MODE=highres (todos los backbones usan el mismo H×W).
+HIGHRES_INPUT_SIZE: tuple[int, int] = (512, 512)
 
 MODE_DESCRIPTIONS: dict[str, str] = {
     "simple": (
         "Clasificador de imagen completa: backbone + GAP + MLP. Baseline sin MIL."
     ),
-    "native": (
-        "Igual que SIMPLE (backbone + GAP + MLP, sin MIL) pero alimentando la imagen "
-        "a su RESOLUCION ORIGINAL en lugar de reescalarla al input nativo del backbone. "
-        "Al ser el backbone totalmente convolucional + GAP, acepta cualquier resolucion "
-        "sin modificar capas; evita comprimir la imagen a costa de mayor uso de memoria."
+    "highres": (
+        "Igual que SIMPLE (backbone + GAP + MLP, sin MIL) pero con entrada fija "
+        f"{HIGHRES_INPUT_SIZE[0]}×{HIGHRES_INPUT_SIZE[1]} para todos los backbones, "
+        "en lugar de reescalar al input nativo de cada arquitectura. El backbone es "
+        "totalmente convolucional + GAP, asi que acepta esa resolucion sin modificar "
+        "capas; mayor uso de memoria y tiempo que SIMPLE."
     ),
     "abmil": (
         "ABMIL (Ilse et al., 2018): atencion gated sobre instancias del bag, "
