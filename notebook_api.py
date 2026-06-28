@@ -25,6 +25,7 @@ from src.backbone_provider import (
 )
 from src.comet_logging import (
     CometEpochLogger,
+    log_dataset_class_counts,
     log_deterministic_input_samples,
     log_keras_eval_metrics,
     log_stage_timing,
@@ -69,6 +70,7 @@ __all__ = [
     "resolve_backbone",
     # comet_logging
     "CometEpochLogger",
+    "log_dataset_class_counts",
     "log_deterministic_input_samples",
     "log_keras_eval_metrics",
     "log_stage_timing",

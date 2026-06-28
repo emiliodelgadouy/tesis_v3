@@ -422,6 +422,29 @@ def log_deterministic_input_samples(
         )
 
 
+def log_dataset_class_counts(
+    experiment,
+    *,
+    train=None,
+    val=None,
+    test=None,
+    label_column: str = "cls",
+) -> None:
+    """Loguea cantidad de muestras clase 0 y 1 por split (train/val/test) en Comet."""
+    metrics: dict[str, int] = {}
+    for split_name, df in (("train", train), ("val", val), ("test", test)):
+        if df is None or len(df) == 0:
+            continue
+        labels = np.asarray(df[label_column]).reshape(-1)
+        n_pos = int(np.sum(labels >= 0.5))
+        n_neg = int(len(labels) - n_pos)
+        metrics[f"{split_name}_neg"] = n_neg
+        metrics[f"{split_name}_pos"] = n_pos
+        metrics[f"{split_name}_n"] = n_neg + n_pos
+    if metrics:
+        experiment.log_metrics(metrics)
+
+
 def log_keras_eval_metrics(
     experiment,
     model,
@@ -441,7 +464,7 @@ def log_keras_eval_metrics(
         eval_ds = dataset.ordered() if split_name == "train" and hasattr(dataset, "ordered") else dataset
         metrics = model.evaluate(eval_ds, return_dict=True)
         experiment.log_metrics(
-            {f"{split_name}_keras_{key}": float(value) for key, value in metrics.items()}
+            {f"{split_name}_{key}": float(value) for key, value in metrics.items()}
         )
 
 
@@ -509,6 +532,7 @@ def _log_split_eval(
     experiment.log_metrics(
         {
             f"{key}_n": int(len(y_true)),
+            f"{key}_neg": int(len(y_true) - np.sum(y_true >= 0.5)),
             f"{key}_pos": int(np.sum(y_true >= 0.5)),
             f"{key}_roc_auc": round(roc_auc, 4),
             f"{key}_pr_auc": round(pr_auc, 4),
