@@ -119,9 +119,13 @@ def _log_model_param_counts(experiment, model) -> None:
     """Loguea la cantidad de parametros del modelo (totales, entrenables y no entrenables)."""
     trainable = int(sum(np.prod(w.shape) for w in model.trainable_weights))
     non_trainable = int(sum(np.prod(w.shape) for w in model.non_trainable_weights))
-    experiment.log_metric("model_total_params", trainable + non_trainable)
+    total = trainable + non_trainable
+    experiment.log_metric("model_total_params", total)
     experiment.log_metric("model_trainable_params", trainable)
     experiment.log_metric("model_non_trainable_params", non_trainable)
+    # log10 de los parametros totales: util para comparar modelos en escala logaritmica.
+    if total > 0:
+        experiment.log_metric("model_total_params_log10", float(np.log10(total)))
 
 
 def _plot_confusion_matrix(y_true, y_pred, *, title: str):

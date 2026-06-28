@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "clam")
+TRAINING_MODES = ("simple", "abmil", "clam", "native")
 
 MODE_DESCRIPTIONS: dict[str, str] = {
     "simple": (
         "Clasificador de imagen completa: backbone + GAP + MLP. Baseline sin MIL."
+    ),
+    "native": (
+        "Igual que SIMPLE (backbone + GAP + MLP, sin MIL) pero alimentando la imagen "
+        "a su RESOLUCION ORIGINAL en lugar de reescalarla al input nativo del backbone. "
+        "Al ser el backbone totalmente convolucional + GAP, acepta cualquier resolucion "
+        "sin modificar capas; evita comprimir la imagen a costa de mayor uso de memoria."
     ),
     "abmil": (
         "ABMIL (Ilse et al., 2018): atencion gated sobre instancias del bag, "
