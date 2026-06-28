@@ -422,6 +422,104 @@ def log_deterministic_input_samples(
         )
 
 
+def log_keras_eval_metrics(
+    experiment,
+    model,
+    *,
+    train_ds=None,
+    val_ds=None,
+    test_ds=None,
+) -> None:
+    """Loguea metricas nativas de Keras (evaluate) para train/val/test en Comet.
+
+    Para train usa la vista ordenada (sin shuffle) cuando el dataset es
+    InspectDataset, de modo que el orden de muestras sea estable.
+    """
+    for split_name, dataset in (("train", train_ds), ("val", val_ds), ("test", test_ds)):
+        if dataset is None:
+            continue
+        eval_ds = dataset.ordered() if split_name == "train" and hasattr(dataset, "ordered") else dataset
+        metrics = model.evaluate(eval_ds, return_dict=True)
+        experiment.log_metrics(
+            {f"{split_name}_keras_{key}": float(value) for key, value in metrics.items()}
+        )
+
+
+def _log_split_eval(
+    experiment,
+    *,
+    backbone_name: str,
+    split_name: str,
+    y_true,
+    y_prob,
+    y_pred_default,
+    y_pred_youden,
+    prob_threshold: float,
+    thr_youden: float,
+    thr_recall90: float,
+    show_plots: bool,
+) -> None:
+    """Loguea TODO lo de un split: matrices, curvas ROC/PR y escalares clinicos."""
+    key = split_name.lower()
+    y_true = np.asarray(y_true).astype(int).reshape(-1)
+    y_prob = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+
+    _log_split_confusion_matrices(
+        experiment,
+        backbone_name=backbone_name,
+        split_name=split_name,
+        y_true=y_true,
+        y_pred_default=y_pred_default,
+        y_pred_youden=y_pred_youden,
+        prob_threshold=prob_threshold,
+        thr_youden=thr_youden,
+        show_plots=show_plots,
+    )
+
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    prec, rec, _ = precision_recall_curve(y_true, y_prob)
+    roc_auc = float(roc_auc_score(y_true, y_prob))
+    pr_auc = float(average_precision_score(y_true, y_prob))
+
+    # Curvas nativas de Comet: interactivas y comparables entre experimentos.
+    experiment.log_curve(f"{key}_roc", x=fpr.tolist(), y=tpr.tolist())
+    experiment.log_curve(f"{key}_pr", x=rec.tolist(), y=prec.tolist())
+
+    fig_roc_pr, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(11, 4))
+    ax_roc.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+    ax_roc.plot([0, 1], [0, 1], "--", color="gray")
+    ax_roc.set_xlabel("1 - Especificidad (FPR)")
+    ax_roc.set_ylabel("Sensibilidad (TPR)")
+    ax_roc.set_title(f"ROC — {split_name} ({backbone_name})")
+    ax_roc.legend(loc="lower right")
+    ax_pr.plot(rec, prec, label=f"AP = {pr_auc:.3f}")
+    ax_pr.set_xlabel("Recall")
+    ax_pr.set_ylabel("Precision")
+    ax_pr.set_title(f"Precision-Recall — {split_name}")
+    ax_pr.legend(loc="upper right")
+    plt.tight_layout()
+    experiment.log_figure(figure_name=f"roc_pr_curves_{key}", figure=fig_roc_pr)
+    if show_plots:
+        plt.show()
+    plt.close(fig_roc_pr)
+
+    sens_y, spec_y = _sens_spec(y_true, y_prob, thr_youden)
+    sens_r, spec_r = _sens_spec(y_true, y_prob, thr_recall90)
+
+    experiment.log_metrics(
+        {
+            f"{key}_n": int(len(y_true)),
+            f"{key}_pos": int(np.sum(y_true >= 0.5)),
+            f"{key}_roc_auc": round(roc_auc, 4),
+            f"{key}_pr_auc": round(pr_auc, 4),
+            f"{key}_sens_youden": round(float(sens_y), 4),
+            f"{key}_spec_youden": round(float(spec_y), 4),
+            f"{key}_sens_recall90": round(float(sens_r), 4),
+            f"{key}_spec_recall90": round(float(spec_r), 4),
+        }
+    )
+
+
 def log_test_results(
     experiment,
     *,
@@ -437,78 +535,73 @@ def log_test_results(
     best_val_metric: float,
     random_seed: int,
     y_val_true=None,
+    y_val_prob=None,
     y_val_pred_default=None,
     y_val_pred_youden=None,
+    y_train_true=None,
+    y_train_prob=None,
+    y_train_pred_default=None,
+    y_train_pred_youden=None,
     n_sample_images: int = COMET_N_SAMPLE_IMAGES,
     final_weights_path=None,
     show_plots: bool = True,
 ) -> str:
-    if y_val_true is not None and y_val_pred_default is not None and y_val_pred_youden is not None:
-        _log_split_confusion_matrices(
+    """Loguea evaluacion completa a Comet de forma simetrica para train/val/test.
+
+    Para cada split disponible loguea: matrices de confusion (umbral default y
+    Youden), curvas ROC/PR nativas + figura, y escalares clinicos prefijados con
+    el nombre del split ({split}_roc_auc, {split}_pr_auc, {split}_sens_youden,
+    {split}_spec_youden, {split}_sens_recall90, {split}_spec_recall90, {split}_n,
+    {split}_pos). Train y val son opcionales: solo se loguean si se pasan sus
+    predicciones/probabilidades.
+    """
+    splits = [
+        (
+            "Train",
+            y_train_true,
+            y_train_prob,
+            y_train_pred_default,
+            y_train_pred_youden,
+        ),
+        (
+            "Val",
+            y_val_true,
+            y_val_prob,
+            y_val_pred_default,
+            y_val_pred_youden,
+        ),
+        (
+            "Test",
+            y_test_true,
+            y_test_prob,
+            y_pred_default,
+            y_pred_youden,
+        ),
+    ]
+
+    for split_name, y_true, y_prob, y_pd, y_py in splits:
+        if any(v is None for v in (y_true, y_prob, y_pd, y_py)):
+            continue
+        _log_split_eval(
             experiment,
             backbone_name=backbone_name,
-            split_name="Val",
-            y_true=y_val_true,
-            y_pred_default=y_val_pred_default,
-            y_pred_youden=y_val_pred_youden,
+            split_name=split_name,
+            y_true=y_true,
+            y_prob=y_prob,
+            y_pred_default=y_pd,
+            y_pred_youden=y_py,
             prob_threshold=prob_threshold,
             thr_youden=thr_youden,
+            thr_recall90=thr_recall90,
             show_plots=show_plots,
         )
 
-    _log_split_confusion_matrices(
-        experiment,
-        backbone_name=backbone_name,
-        split_name="Test",
-        y_true=y_test_true,
-        y_pred_default=y_pred_default,
-        y_pred_youden=y_pred_youden,
-        prob_threshold=prob_threshold,
-        thr_youden=thr_youden,
-        show_plots=show_plots,
-    )
-
-    fpr, tpr, _ = roc_curve(y_test_true, y_test_prob)
-    prec, rec, _ = precision_recall_curve(y_test_true, y_test_prob)
-
-    # Curvas nativas de Comet: interactivas y comparables entre experimentos.
-    experiment.log_curve("roc", x=fpr.tolist(), y=tpr.tolist())
-    experiment.log_curve("pr", x=rec.tolist(), y=prec.tolist())
-
-    fig_roc_pr, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(11, 4))
-    ax_roc.plot(fpr, tpr, label=f"AUC = {roc_auc_score(y_test_true, y_test_prob):.3f}")
-    ax_roc.plot([0, 1], [0, 1], "--", color="gray")
-    ax_roc.set_xlabel("1 - Especificidad (FPR)")
-    ax_roc.set_ylabel("Sensibilidad (TPR)")
-    ax_roc.set_title(f"ROC — Test ({backbone_name})")
-    ax_roc.legend(loc="lower right")
-    ax_pr.plot(rec, prec, label=f"AP = {average_precision_score(y_test_true, y_test_prob):.3f}")
-    ax_pr.set_xlabel("Recall")
-    ax_pr.set_ylabel("Precision")
-    ax_pr.set_title("Precision-Recall — Test")
-    ax_pr.legend(loc="upper right")
-    plt.tight_layout()
-    experiment.log_figure(figure_name="roc_pr_curves_test", figure=fig_roc_pr)
-    if show_plots:
-        plt.show()
-    plt.close(fig_roc_pr)
-
-    sens_y, spec_y = _sens_spec(y_test_true, y_test_prob, thr_youden)
-    sens_r, spec_r = _sens_spec(y_test_true, y_test_prob, thr_recall90)
-
+    # Escalares globales (umbrales elegidos en validacion + mejor metrica de val).
     experiment.log_metrics(
         {
-            "n_test": int(len(y_test_true)),
-            "test_pos": int(np.sum(np.asarray(y_test_true) >= 0.5)),
             "val_best_auc": round(float(best_val_metric), 4),
-            "test_roc_auc": round(float(roc_auc_score(y_test_true, y_test_prob)), 4),
-            "test_pr_auc": round(float(average_precision_score(y_test_true, y_test_prob)), 4),
-            "thr_youden": round(thr_youden, 4),
-            "sens_youden": round(float(sens_y), 4),
-            "spec_youden": round(float(spec_y), 4),
-            "thr_recall90": round(thr_recall90, 4),
-            "sens_recall90": round(float(sens_r), 4),
-            "spec_recall90": round(float(spec_r), 4),
+            "thr_youden": round(float(thr_youden), 4),
+            "thr_recall90": round(float(thr_recall90), 4),
         }
     )
 
