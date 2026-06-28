@@ -37,6 +37,12 @@ from src.comet_logging import (
 from src.dataset import build_dataset
 from src.dataset_provider import as_tf_dataset, build_dataset_provider
 from src.imports import get_device, set_seed
+from src.mammo_clip import (
+    DEFAULT_ZERO_SHOT_PROMPTS,
+    MammoClipZeroShotConfig,
+    load_mammoclip_model,
+    predict_mammoclip_zero_shot,
+)
 from src.model_builder import ModelBuilder
 from src.plots import plot_history
 from src.utils import (
@@ -85,6 +91,11 @@ __all__ = [
     # imports
     "get_device",
     "set_seed",
+    # mammo_clip
+    "DEFAULT_ZERO_SHOT_PROMPTS",
+    "MammoClipZeroShotConfig",
+    "load_mammoclip_model",
+    "predict_mammoclip_zero_shot",
     # model_builder
     "ModelBuilder",
     # plots

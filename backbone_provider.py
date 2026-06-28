@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from tensorflow import keras
 
-from src.backbones import chexnet, custom_cnn, custom_tiny, efficientnet, efficientnet_v2, radimagenet, vgg
+from src.backbones import chexnet, custom_cnn, custom_tiny, efficientnet, efficientnet_v2, mammoclip, radimagenet, vgg
 from src.backbones._types import InputSize, ModelFactory, PreprocessFunction
 from src.backbones.chexnet import CheXNetDenseNet121
 from src.backbones.custom_cnn import CustomCnnBackbone
@@ -34,6 +34,7 @@ from src.backbones.radimagenet import (
     RadImageNetInceptionV3,
     RadImageNetResNet50,
 )
+from src.backbones.mammoclip import MammoClipBackbone
 
 
 ARCHITECTURE_DESCRIPTIONS: dict[str, str] = {
@@ -44,6 +45,7 @@ ARCHITECTURE_DESCRIPTIONS: dict[str, str] = {
     **efficientnet_v2.DESCRIPTIONS,
     **radimagenet.DESCRIPTIONS,
     "chexnet": chexnet.DESCRIPTION,
+    "mammoclip": mammoclip.DESCRIPTION,
 }
 
 
@@ -152,6 +154,13 @@ BACKBONES: dict[str, BackboneConfig] = {
         chexnet.preprocess_input,
         (224, 224),
         default_weights="chexnet",
+    ),
+    "mammoclip": BackboneConfig(
+        "mammoclip",
+        MammoClipBackbone,
+        mammoclip.preprocess_input,
+        (224, 224),
+        default_weights="mammoclip",
     ),
 }
 
