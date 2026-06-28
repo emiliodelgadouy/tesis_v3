@@ -157,3 +157,69 @@ def predict_mammoclip_zero_shot(
         output_csv.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(output_csv, index=False)
     return result
+
+
+def extract_mammoclip_embeddings(
+    df: pd.DataFrame,
+    *,
+    model: Any | None = None,
+    path_column: str = "path",
+    label_column: str = "cls",
+    limit: int | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+    verbose: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Extrae embeddings normalizados del image encoder de MAMMO-CLIP.
+
+    El zero-shot del paquete hace ``softmax`` de similitudes coseno SIN temperatura
+    (``logit_scale``), por lo que las probabilidades quedan casi uniformes (~0.5) y
+    poco útiles. Sin embargo, los embeddings de imagen sí son discriminativos, así que
+    la vía robusta (la que usa el paper para evaluar) es un *linear probe*: extraer
+    embeddings y entrenar un clasificador lineal encima.
+
+    Parameters
+    ----------
+    df:
+        Tabla con al menos `path_column`.
+    model:
+        Instancia de `mammoclip.MammoClipModel` ya cargada. Si es None se carga una.
+    path_column / label_column:
+        Columnas de ruta de imagen y etiqueta.
+    limit:
+        Limita la cantidad de filas (smoke test).
+    verbose:
+        Imprime progreso cada 50 imágenes.
+
+    Returns
+    -------
+    (X, y):
+        X de forma (N, D) float32 con embeddings; y de forma (N,) float32 o None si
+        no existe `label_column`.
+    """
+
+    model = model or load_mammoclip_model(**(model_kwargs or {}))
+    if path_column not in df.columns:
+        raise KeyError(f"Falta la columna de paths: {path_column!r}")
+
+    table = df.reset_index(drop=True)
+    if limit is not None:
+        table = table.iloc[: int(limit)].copy()
+
+    paths = table[path_column].astype(str).tolist()
+    embeddings: list[np.ndarray] = []
+    for i, path in enumerate(paths):
+        emb = np.asarray(model.encode_image(path)).reshape(-1)
+        embeddings.append(emb)
+        if verbose and (i + 1) % 50 == 0:
+            print(f"  embeddings {i + 1}/{len(paths)}")
+
+    if not embeddings:
+        raise ValueError("No se extrajo ningún embedding (tabla vacía).")
+
+    X = np.vstack(embeddings).astype(np.float32)
+    y = (
+        table[label_column].astype("float32").to_numpy()
+        if label_column in table.columns
+        else None
+    )
+    return X, y

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from tensorflow import keras
@@ -13,7 +14,8 @@ from tensorflow.keras.applications import (
     ResNet50,
 )
 
-from ._types import ModelFactory
+from ._types import InputSize, ModelFactory
+from .base import Backbone, DEFAULT_WEIGHTS
 from .medical_weights import (
     extract_zip_bundle,
     import_gdown,
@@ -21,19 +23,11 @@ from .medical_weights import (
     transfer_legacy_weights,
 )
 
-# Carpeta oficial con los .h5 de RadImageNet en formato TF/Keras.
-# https://github.com/BMEII-AI/RadImageNet
 RADIMAGENET_FOLDER_ID = "1Es7cK1hv7zNHJoUW0tI0e6nLFVYTqPqK"
-
-# Bundle ZIP oficial con los cuatro modelos TF (~1.8 GB). Los .h5 quedan en
-# RadImageNet_models/ al extraer. Se usa si download_folder falla (muy comun sin cookies).
 RADIMAGENET_TF_BUNDLE_ID = "1UgYviv2K6QPM1SCexqqab5-yTgwoAFEc"
 RADIMAGENET_BUNDLE_ZIP_NAME = "RadImageNet_tensorflow_pretrained_bundle.zip"
-# Evita tratar como ZIP valido una pagina HTML de aviso de Google (~2 KB).
 MIN_RADIMAGENET_ZIP_BYTES = 100 * 1024 * 1024
 
-# Patrones para localizar cada arquitectura una vez descargada la carpeta.
-# El negative-lookahead en inception_v3 evita matchear el archivo de IRV2.
 RADIMAGENET_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
     "densenet121": (r"densenet[_-]?121",),
     "resnet50": (r"resnet[_-]?50",),
@@ -41,7 +35,7 @@ RADIMAGENET_NAME_PATTERNS: dict[str, tuple[str, ...]] = {
     "irv2": (r"irv2", r"inception[_-]?resnet[_-]?v2"),
 }
 
-DESCRIPTIONS = {
+_DESCRIPTIONS = {
     "radimagenetdensenet121": (
         "DenseNet-121 preentrenada en RadImageNet (Mei et al., Radiology AI 2022): ~1,35 M "
         "imagenes de 7 modalidades (CT, MRI, US, etc.). Transfer learning orientado a "
@@ -62,16 +56,7 @@ DESCRIPTIONS = {
 }
 
 
-def preprocess_input(x):
-    """Preprocesamiento fiel al entrenamiento TF oficial de RadImageNet.
-
-    El codigo TF de RadImageNet uso ``ImageDataGenerator(preprocessing_function=
-    preprocess_input, rescale=1/255)``: primero ``preprocess_input`` en modo
-    ``caffe`` (RGB->BGR y resta de la media de ImageNet, sin escalar) y LUEGO
-    ``/255``. Es decir ``(BGR - [103.94, 116.78, 123.68]) / 255`` (rango
-    ~[-0.49, 0.59]). Usar solo ``x/255`` ([0,1]) NO coincide con la distribucion
-    de entrada esperada por los pesos y degrada fuertemente las features.
-    """
+def _radimagenet_preprocess_input(x):
     from tensorflow.keras.applications.imagenet_utils import preprocess_input as imagenet_preprocess
 
     x = imagenet_preprocess(x, mode="caffe")
@@ -91,7 +76,6 @@ def _ensure_radimagenet_weights() -> Path:
 
     gdown = import_gdown()
 
-    # 1) Reintentar extraccion si ya hay un ZIP parcial/corrupto en cache.
     zip_path = cache_dir / RADIMAGENET_BUNDLE_ZIP_NAME
     if extract_zip_bundle(zip_path, cache_dir, min_bytes=MIN_RADIMAGENET_ZIP_BYTES):
         if _list_radimagenet_h5(cache_dir):
@@ -101,9 +85,6 @@ def _ensure_radimagenet_weights() -> Path:
                 pass
             return cache_dir
 
-    # 2) Carpeta de Drive (archivos sueltos). Historicamente fallaba sin cookies
-    # y desde 2025-2026 la carpeta original devuelve 404, asi que solo se intenta
-    # si el usuario fuerza el modo con RADIMAGENET_TRY_FOLDER=1.
     if os.environ.get("RADIMAGENET_TRY_FOLDER", "").lower() in {"1", "true", "yes"}:
         try:
             gdown.download_folder(
@@ -112,7 +93,7 @@ def _ensure_radimagenet_weights() -> Path:
                 quiet=False,
                 use_cookies=True,
             )
-        except Exception as exc:  # gdown.exceptions.DownloadError u otros
+        except Exception as exc:
             print(
                 f"Aviso: fallo la descarga de la carpeta de Drive ({exc!s}). "
                 "Continuando con el bundle ZIP oficial."
@@ -120,7 +101,6 @@ def _ensure_radimagenet_weights() -> Path:
         if _list_radimagenet_h5(cache_dir):
             return cache_dir
 
-    # 3) Bundle oficial (contiene RadImageNet_models/*.h5).
     bundle_url = f"https://drive.google.com/uc?id={RADIMAGENET_TF_BUNDLE_ID}"
     try:
         gdown.download(bundle_url, str(zip_path), quiet=False)
@@ -186,92 +166,80 @@ def _radimagenet_weights_path(model_key: str) -> Path:
     )
 
 
-def _build_radimagenet_backbone(
-    base_model_fn: ModelFactory,
-    model_key: str,
-    weights,
-    include_top: bool,
-    input_shape: tuple[int, int, int] | None,
-    name: str,
-    **kwargs,
-) -> keras.Model:
-    if include_top:
-        raise ValueError(
-            "Los pesos RadImageNet solo soportan include_top=False (sin cabeza)."
-        )
+@dataclass(frozen=True)
+class RadImageNetBackbone(Backbone):
+    """Backbone Keras con pesos RadImageNet transferidos desde .h5 legacy."""
 
-    if weights == "radimagenet":
-        weights_path = _radimagenet_weights_path(model_key)
-        # Los .h5 oficiales son *_notop.h5 guardados con Keras 2.4 (arquitectura +
-        # pesos, sin cabeza). Keras 3 no puede deserializar su arquitectura porque
-        # las capas usan nombres con '/' (p. ej. 'conv1/conv'). Reconstruimos la
-        # arquitectura limpia en Keras 3 y transferimos los pesos por posicion
-        # desde el modelo legacy (cargado con tf_keras), preservando BN incluido.
-        base_model = base_model_fn(
-            weights=None, include_top=False, input_shape=input_shape, **kwargs
-        )
-        transfer_legacy_weights(base_model, weights_path)
-    elif weights == "imagenet":
-        base_model = base_model_fn(
-            weights="imagenet", include_top=False, input_shape=input_shape, **kwargs
-        )
-    elif weights is None:
-        base_model = base_model_fn(
-            weights=None, include_top=False, input_shape=input_shape, **kwargs
-        )
-    else:
-        base_model = base_model_fn(
-            weights=None, include_top=False, input_shape=input_shape, **kwargs
-        )
-        base_model.load_weights(str(weights))
+    key: str
+    keras_name: str
+    model_key: str
+    base_model_fn: ModelFactory
+    description: str
+    input_size: InputSize = (224, 224)
+    default_weights: str | None = "radimagenet"
 
-    base_model._name = name
-    return base_model
+    def preprocess_input(self, x):
+        return _radimagenet_preprocess_input(x)
+
+    def build(
+        self,
+        *,
+        weights=DEFAULT_WEIGHTS,
+        include_top: bool = False,
+        input_shape: tuple[int, int, int] | None = None,
+        **kwargs,
+    ) -> keras.Model:
+        weights = self._resolve_weights(weights)
+        input_shape = self._default_input_shape(input_shape)
+
+        if include_top:
+            raise ValueError(
+                "Los pesos RadImageNet solo soportan include_top=False (sin cabeza)."
+            )
+
+        if weights == "radimagenet":
+            weights_path = _radimagenet_weights_path(self.model_key)
+            base_model = self.base_model_fn(
+                weights=None, include_top=False, input_shape=input_shape, **kwargs
+            )
+            transfer_legacy_weights(base_model, weights_path)
+        elif weights == "imagenet":
+            base_model = self.base_model_fn(
+                weights="imagenet", include_top=False, input_shape=input_shape, **kwargs
+            )
+        elif weights is None:
+            base_model = self.base_model_fn(
+                weights=None, include_top=False, input_shape=input_shape, **kwargs
+            )
+        else:
+            base_model = self.base_model_fn(
+                weights=None, include_top=False, input_shape=input_shape, **kwargs
+            )
+            base_model.load_weights(str(weights))
+
+        base_model._name = self.keras_name
+        return base_model
 
 
-def RadImageNetDenseNet121(
-    weights="radimagenet",
-    include_top: bool = False,
-    input_shape: tuple[int, int, int] | None = None,
-    name: str = "radimagenet_densenet121",
-    **kwargs,
-) -> keras.Model:
-    return _build_radimagenet_backbone(
-        DenseNet121, "densenet121", weights, include_top, input_shape, name, **kwargs
+_VARIANTS: tuple[tuple[str, str, str, ModelFactory], ...] = (
+    ("radimagenetdensenet121", "radimagenet_densenet121", "densenet121", DenseNet121),
+    ("radimagenetresnet50", "radimagenet_resnet50", "resnet50", ResNet50),
+    ("radimagenetinceptionv3", "radimagenet_inceptionv3", "inceptionv3", InceptionV3),
+    (
+        "radimagenetinceptionresnetv2",
+        "radimagenet_inceptionresnetv2",
+        "irv2",
+        InceptionResNetV2,
+    ),
+)
+
+BACKBONES: tuple[Backbone, ...] = tuple(
+    RadImageNetBackbone(
+        key=key,
+        keras_name=keras_name,
+        model_key=model_key,
+        base_model_fn=model_fn,
+        description=_DESCRIPTIONS[key],
     )
-
-
-def RadImageNetResNet50(
-    weights="radimagenet",
-    include_top: bool = False,
-    input_shape: tuple[int, int, int] | None = None,
-    name: str = "radimagenet_resnet50",
-    **kwargs,
-) -> keras.Model:
-    return _build_radimagenet_backbone(
-        ResNet50, "resnet50", weights, include_top, input_shape, name, **kwargs
-    )
-
-
-def RadImageNetInceptionV3(
-    weights="radimagenet",
-    include_top: bool = False,
-    input_shape: tuple[int, int, int] | None = None,
-    name: str = "radimagenet_inceptionv3",
-    **kwargs,
-) -> keras.Model:
-    return _build_radimagenet_backbone(
-        InceptionV3, "inceptionv3", weights, include_top, input_shape, name, **kwargs
-    )
-
-
-def RadImageNetInceptionResNetV2(
-    weights="radimagenet",
-    include_top: bool = False,
-    input_shape: tuple[int, int, int] | None = None,
-    name: str = "radimagenet_inceptionresnetv2",
-    **kwargs,
-) -> keras.Model:
-    return _build_radimagenet_backbone(
-        InceptionResNetV2, "irv2", weights, include_top, input_shape, name, **kwargs
-    )
+    for key, keras_name, model_key, model_fn in _VARIANTS
+)

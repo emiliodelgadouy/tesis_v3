@@ -1,45 +1,46 @@
-"""Implementaciones de backbones y utilidades por familia."""
+"""Backbones como objetos registrables; el provider solo reexporta el registro."""
 
-from . import (
-    chexnet,
-    custom_cnn,
-    custom_tiny,
-    efficientnet,
-    efficientnet_v2,
-    mammoclip,
-    radimagenet,
-    vgg,
-)
-from ._types import InputSize, ModelFactory, PreprocessFunction
-from .chexnet import CheXNetDenseNet121
+from .base import Backbone, DEFAULT_WEIGHTS, KerasApplicationBackbone, keras_application
+from .chexnet import CheXNetBackbone
 from .custom_cnn import CustomCnnBackbone
 from .custom_tiny import CustomTinyBackbone
 from .mammoclip import MammoClipBackbone
-from .radimagenet import (
-    RadImageNetDenseNet121,
-    RadImageNetInceptionResNetV2,
-    RadImageNetInceptionV3,
-    RadImageNetResNet50,
+from .radimagenet import RadImageNetBackbone
+from .registry import (
+    BACKBONES,
+    BackboneConfig,
+    available_backbones,
+    build_backbone,
+    format_all_architecture_descriptions,
+    get_backbone,
+    get_backbone_config,
+    get_backbone_description,
+    get_input_size,
+    get_preprocess_input,
+    normalize_name,
+    resolve_backbone,
 )
 
 __all__ = [
-    "InputSize",
-    "ModelFactory",
-    "PreprocessFunction",
-    "CustomTinyBackbone",
+    "BACKBONES",
+    "Backbone",
+    "BackboneConfig",
+    "DEFAULT_WEIGHTS",
+    "KerasApplicationBackbone",
+    "CheXNetBackbone",
     "CustomCnnBackbone",
-    "CheXNetDenseNet121",
+    "CustomTinyBackbone",
     "MammoClipBackbone",
-    "RadImageNetDenseNet121",
-    "RadImageNetResNet50",
-    "RadImageNetInceptionV3",
-    "RadImageNetInceptionResNetV2",
-    "chexnet",
-    "custom_cnn",
-    "custom_tiny",
-    "efficientnet",
-    "efficientnet_v2",
-    "mammoclip",
-    "radimagenet",
-    "vgg",
+    "RadImageNetBackbone",
+    "available_backbones",
+    "build_backbone",
+    "format_all_architecture_descriptions",
+    "get_backbone",
+    "get_backbone_config",
+    "get_backbone_description",
+    "get_input_size",
+    "get_preprocess_input",
+    "keras_application",
+    "normalize_name",
+    "resolve_backbone",
 ]

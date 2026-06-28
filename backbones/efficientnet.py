@@ -12,7 +12,9 @@ from tensorflow.keras.applications import (
 )
 from tensorflow.keras.applications.efficientnet import preprocess_input
 
-DESCRIPTIONS = {
+from .base import Backbone, keras_application
+
+_DESCRIPTIONS = {
     "efficientnetb0": (
         "EfficientNet-B0 (Tan & Le, 2019): escalado compuesto de profundidad, ancho y "
         "resolucion; Mobile Inverted Bottleneck (MBConv). La variante mas liviana de la "
@@ -26,3 +28,19 @@ DESCRIPTIONS = {
     "efficientnetb6": "EfficientNet-B6. ImageNet, entrada 528×528.",
     "efficientnetb7": "EfficientNet-B7: maxima escala de la serie original. ImageNet, entrada 600×600.",
 }
+
+_VARIANTS: tuple[tuple[str, type, tuple[int, int]], ...] = (
+    ("efficientnetb0", EfficientNetB0, (224, 224)),
+    ("efficientnetb1", EfficientNetB1, (240, 240)),
+    ("efficientnetb2", EfficientNetB2, (260, 260)),
+    ("efficientnetb3", EfficientNetB3, (300, 300)),
+    ("efficientnetb4", EfficientNetB4, (380, 380)),
+    ("efficientnetb5", EfficientNetB5, (456, 456)),
+    ("efficientnetb6", EfficientNetB6, (528, 528)),
+    ("efficientnetb7", EfficientNetB7, (600, 600)),
+)
+
+BACKBONES: tuple[Backbone, ...] = tuple(
+    keras_application(key, model_fn, preprocess_input, input_size, _DESCRIPTIONS[key])
+    for key, model_fn, input_size in _VARIANTS
+)

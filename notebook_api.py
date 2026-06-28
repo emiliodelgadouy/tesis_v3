@@ -40,6 +40,7 @@ from src.imports import get_device, set_seed
 from src.mammo_clip import (
     DEFAULT_ZERO_SHOT_PROMPTS,
     MammoClipZeroShotConfig,
+    extract_mammoclip_embeddings,
     load_mammoclip_model,
     predict_mammoclip_zero_shot,
 )
@@ -94,6 +95,7 @@ __all__ = [
     # mammo_clip
     "DEFAULT_ZERO_SHOT_PROMPTS",
     "MammoClipZeroShotConfig",
+    "extract_mammoclip_embeddings",
     "load_mammoclip_model",
     "predict_mammoclip_zero_shot",
     # model_builder
