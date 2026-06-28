@@ -126,6 +126,55 @@ def _plot_confusion_matrix(y_true, y_pred, *, title: str):
     return fig
 
 
+def _log_split_confusion_matrices(
+    experiment,
+    *,
+    backbone_name: str,
+    split_name: str,
+    y_true,
+    y_pred_default,
+    y_pred_youden,
+    prob_threshold: float,
+    thr_youden: float,
+    show_plots: bool,
+) -> None:
+    split_key = split_name.lower()
+    experiment.log_confusion_matrix(
+        y_true=y_true,
+        y_predicted=y_pred_default,
+        labels=["Neg", "Pos"],
+        title=f"{split_name} — umbral {prob_threshold}",
+        file_name=f"confusion_matrix_{split_key}_default.json",
+    )
+    experiment.log_confusion_matrix(
+        y_true=y_true,
+        y_predicted=y_pred_youden,
+        labels=["Neg", "Pos"],
+        title=f"{split_name} — umbral Youden J = {thr_youden:.4f}",
+        file_name=f"confusion_matrix_{split_key}_youden.json",
+    )
+
+    fig_cm_default = _plot_confusion_matrix(
+        y_true,
+        y_pred_default,
+        title=f"{backbone_name} — {split_name} — umbral = {prob_threshold}",
+    )
+    experiment.log_figure(figure_name=f"confusion_matrix_{split_key}_default", figure=fig_cm_default)
+    if show_plots:
+        plt.show()
+    plt.close(fig_cm_default)
+
+    fig_cm_youden = _plot_confusion_matrix(
+        y_true,
+        y_pred_youden,
+        title=f"{backbone_name} — {split_name} — umbral Youden J = {thr_youden:.4f}",
+    )
+    experiment.log_figure(figure_name=f"confusion_matrix_{split_key}_youden", figure=fig_cm_youden)
+    if show_plots:
+        plt.show()
+    plt.close(fig_cm_youden)
+
+
 def _bag_to_montage(bag: np.ndarray) -> np.ndarray:
     """Une las instancias (K, H, W, C) de un bag MIL en una imagen-grilla."""
     bag = np.asarray(bag)
@@ -378,44 +427,37 @@ def log_test_results(
     prob_threshold: float,
     best_val_metric: float,
     random_seed: int,
+    y_val_true=None,
+    y_val_pred_default=None,
+    y_val_pred_youden=None,
     n_sample_images: int = COMET_N_SAMPLE_IMAGES,
     final_weights_path=None,
     show_plots: bool = True,
 ) -> str:
-    experiment.log_confusion_matrix(
-        y_true=y_test_true,
-        y_predicted=y_pred_default,
-        labels=["Neg", "Pos"],
-        title=f"Test — umbral {prob_threshold}",
-        file_name="confusion_matrix_test_default.json",
-    )
-    experiment.log_confusion_matrix(
-        y_true=y_test_true,
-        y_predicted=y_pred_youden,
-        labels=["Neg", "Pos"],
-        title=f"Test — umbral Youden J = {thr_youden:.4f}",
-        file_name="confusion_matrix_test_youden.json",
-    )
+    if y_val_true is not None and y_val_pred_default is not None and y_val_pred_youden is not None:
+        _log_split_confusion_matrices(
+            experiment,
+            backbone_name=backbone_name,
+            split_name="Val",
+            y_true=y_val_true,
+            y_pred_default=y_val_pred_default,
+            y_pred_youden=y_val_pred_youden,
+            prob_threshold=prob_threshold,
+            thr_youden=thr_youden,
+            show_plots=show_plots,
+        )
 
-    fig_cm_default = _plot_confusion_matrix(
-        y_test_true,
-        y_pred_default,
-        title=f"{backbone_name} — Test — umbral = {prob_threshold}",
+    _log_split_confusion_matrices(
+        experiment,
+        backbone_name=backbone_name,
+        split_name="Test",
+        y_true=y_test_true,
+        y_pred_default=y_pred_default,
+        y_pred_youden=y_pred_youden,
+        prob_threshold=prob_threshold,
+        thr_youden=thr_youden,
+        show_plots=show_plots,
     )
-    experiment.log_figure(figure_name="confusion_matrix_test_default", figure=fig_cm_default)
-    if show_plots:
-        plt.show()
-    plt.close(fig_cm_default)
-
-    fig_cm_youden = _plot_confusion_matrix(
-        y_test_true,
-        y_pred_youden,
-        title=f"{backbone_name} — Test — umbral Youden J = {thr_youden:.4f}",
-    )
-    experiment.log_figure(figure_name="confusion_matrix_test_youden", figure=fig_cm_youden)
-    if show_plots:
-        plt.show()
-    plt.close(fig_cm_youden)
 
     fpr, tpr, _ = roc_curve(y_test_true, y_test_prob)
     prec, rec, _ = precision_recall_curve(y_test_true, y_test_prob)
