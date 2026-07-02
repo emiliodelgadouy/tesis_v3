@@ -90,8 +90,6 @@ def start_training_experiment(
     *,
     experiment_name: str,
     run_config: dict[str, Any],
-    backbone_description: str,
-    architecture_catalog: str,
     model=None,
     project_name: str = COMET_PROJECT,
 ):
@@ -107,8 +105,6 @@ def start_training_experiment(
     experiment.set_step(0)
     experiment.set_epoch(0)
     experiment.log_parameters(run_config)
-    experiment.log_other("backbone_description", backbone_description)
-    experiment.log_asset_data(architecture_catalog, "catalogo_arquitecturas.txt")
     if model is not None:
         experiment.set_model_graph(model)
         _log_model_param_counts(experiment, model)

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from tensorflow.keras.applications import (
     EfficientNetV2B0,
     EfficientNetV2B1,
@@ -11,32 +9,53 @@ from tensorflow.keras.applications import (
 )
 from tensorflow.keras.applications.efficientnet_v2 import preprocess_input
 
-from .base import Backbone, keras_application
+from .base import ImagenetBackbone
 
-_DESCRIPTIONS = {
-    "efficientnetv2b0": (
-        "EfficientNetV2-B0 (Tan & Le, 2021): bloques Fused-MBConv y entrenamiento progresivo; "
-        "mejor trade-off velocidad/precision que EfficientNet v1. ImageNet, entrada 224×224."
-    ),
-    "efficientnetv2b1": "EfficientNetV2-B1. ImageNet, entrada 240×240.",
-    "efficientnetv2b2": "EfficientNetV2-B2. ImageNet, entrada 260×260.",
-    "efficientnetv2b3": "EfficientNetV2-B3. ImageNet, entrada 300×300.",
-    "efficientnetv2s": "EfficientNetV2-S (small). ImageNet, entrada 384×384.",
-    "efficientnetv2m": "EfficientNetV2-M (medium). ImageNet, entrada 480×480.",
-    "efficientnetv2l": "EfficientNetV2-L (large). ImageNet, entrada 480×480.",
-}
 
-_VARIANTS: tuple[tuple[str, type, tuple[int, int]], ...] = (
-    ("efficientnetv2b0", EfficientNetV2B0, (224, 224)),
-    ("efficientnetv2b1", EfficientNetV2B1, (240, 240)),
-    ("efficientnetv2b2", EfficientNetV2B2, (260, 260)),
-    ("efficientnetv2b3", EfficientNetV2B3, (300, 300)),
-    ("efficientnetv2s", EfficientNetV2S, (384, 384)),
-    ("efficientnetv2m", EfficientNetV2M, (480, 480)),
-    ("efficientnetv2l", EfficientNetV2L, (480, 480)),
-)
+class EfficientNetV2B0Backbone(ImagenetBackbone):
+    key = "efficientnetv2b0"
+    application = EfficientNetV2B0
+    preprocess_fn = preprocess_input
+    input_size = (224, 224)
 
-BACKBONES: tuple[Backbone, ...] = tuple(
-    keras_application(key, model_fn, preprocess_input, input_size, _DESCRIPTIONS[key])
-    for key, model_fn, input_size in _VARIANTS
-)
+
+class EfficientNetV2B1Backbone(ImagenetBackbone):
+    key = "efficientnetv2b1"
+    application = EfficientNetV2B1
+    preprocess_fn = preprocess_input
+    input_size = (240, 240)
+
+
+class EfficientNetV2B2Backbone(ImagenetBackbone):
+    key = "efficientnetv2b2"
+    application = EfficientNetV2B2
+    preprocess_fn = preprocess_input
+    input_size = (260, 260)
+
+
+class EfficientNetV2B3Backbone(ImagenetBackbone):
+    key = "efficientnetv2b3"
+    application = EfficientNetV2B3
+    preprocess_fn = preprocess_input
+    input_size = (300, 300)
+
+
+class EfficientNetV2SBackbone(ImagenetBackbone):
+    key = "efficientnetv2s"
+    application = EfficientNetV2S
+    preprocess_fn = preprocess_input
+    input_size = (384, 384)
+
+
+class EfficientNetV2MBackbone(ImagenetBackbone):
+    key = "efficientnetv2m"
+    application = EfficientNetV2M
+    preprocess_fn = preprocess_input
+    input_size = (480, 480)
+
+
+class EfficientNetV2LBackbone(ImagenetBackbone):
+    key = "efficientnetv2l"
+    application = EfficientNetV2L
+    preprocess_fn = preprocess_input
+    input_size = (480, 480)

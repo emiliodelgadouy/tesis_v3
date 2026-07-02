@@ -1,154 +1,61 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Callable, ClassVar
 
 from tensorflow import keras
 
-from ._types import InputSize, ModelFactory, PreprocessFunction
+ModelFactory = Callable[..., keras.Model]
+PreprocessFunction = Callable
+InputSize = tuple[int, int]
 
 DEFAULT_WEIGHTS = object()
+_REGISTRY: dict[str, Backbone] = {}
+BACKBONES = _REGISTRY
 
 
-class Backbone(ABC):
-    """Contrato de un backbone registrable: metadatos, preproceso y construccion."""
+class Backbone:
+    key: ClassVar[str]
+    input_size: ClassVar[InputSize]
+    default_weights: ClassVar[str | None] = None
+    application: ClassVar[ModelFactory]
+    preprocess_fn: ClassVar[PreprocessFunction]
 
-    key: str
-    keras_name: str
-    input_size: InputSize
-    description: str
-    default_weights: str | None
-
-    @abstractmethod
-    def preprocess_input(self, x):
-        """Normaliza la entrada como en el preentrenamiento del backbone."""
-
-    @abstractmethod
-    def build(
-        self,
-        *,
-        weights=DEFAULT_WEIGHTS,
-        include_top: bool = False,
-        input_shape: tuple[int, int, int] | None = None,
-        **kwargs,
-    ) -> keras.Model:
-        """Instancia el ``keras.Model`` convolucional (sin cabeza de clasificacion)."""
-
-    @property
-    def name(self) -> str:
-        """Alias legacy de ``keras_name`` (``BackboneConfig.name``)."""
-        return self.keras_name
-
-    @property
-    def model_fn(self) -> ModelFactory:
-        """Callable compatible con la API antigua de ``keras.applications``."""
-
-        def factory(
-            weights=DEFAULT_WEIGHTS,
-            include_top: bool = False,
-            input_shape: tuple[int, int, int] | None = None,
-            name: str | None = None,
-            **kwargs,
-        ) -> keras.Model:
-            del name  # Keras Application usa su propio nombre interno; no forzamos aqui.
-            return self.build(
-                weights=weights,
-                include_top=include_top,
-                input_shape=input_shape,
-                **kwargs,
-            )
-
-        return factory
-
-    def format_description(self) -> str:
-        h, w = self.input_size
-        weights = self.default_weights or "none (desde cero)"
-        return (
-            f"Arquitectura: {self.key}\n"
-            f"Entrada: {h}×{w}×3\n"
-            f"Pesos por defecto: {weights}\n\n"
-            f"{self.description}"
-        )
-
-    def resolve(
-        self, input_size: InputSize | None = None
-    ) -> tuple[keras.Model, PreprocessFunction, InputSize]:
-        if input_size is None:
-            input_size = self.input_size
-        height, width = input_size
-        model = self.build(input_shape=(height, width, 3))
-        return model, self.preprocess_input, input_size
-
-    def _resolve_weights(self, weights) -> str | None:
-        if weights is DEFAULT_WEIGHTS:
-            return self.default_weights
-        return weights
-
-    def _default_input_shape(
-        self, input_shape: tuple[int, int, int] | None
-    ) -> tuple[int, int, int]:
-        height, width = self.input_size
-        return input_shape or (height, width, 3)
-
-
-class KerasApplicationBackbone(Backbone):
-    """Wrapper uniforme sobre ``tensorflow.keras.applications``."""
-
-    def __init__(
-        self,
-        key: str,
-        keras_name: str,
-        application: ModelFactory,
-        preprocess_fn: PreprocessFunction,
-        input_size: InputSize,
-        description: str,
-        *,
-        default_weights: str | None = "imagenet",
-    ) -> None:
-        self.key = key
-        self.keras_name = keras_name
-        self._application = application
-        self._preprocess_fn = preprocess_fn
-        self.input_size = input_size
-        self.description = description
-        self.default_weights = default_weights
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if "key" in cls.__dict__:
+            _REGISTRY[cls.key] = cls()
 
     def preprocess_input(self, x):
-        return self._preprocess_fn(x)
+        return self.__class__.preprocess_fn(x)
 
-    def build(
-        self,
-        *,
-        weights=DEFAULT_WEIGHTS,
-        include_top: bool = False,
-        input_shape: tuple[int, int, int] | None = None,
-        **kwargs,
-    ) -> keras.Model:
-        return self._application(
-            weights=self._resolve_weights(weights),
+    def build(self, *, weights=DEFAULT_WEIGHTS, include_top: bool = False, input_shape: tuple[int, int, int] | None = None, **kwargs) -> keras.Model:
+        return self.__class__.application(
+            weights=self.coalesce_weights(weights),
             include_top=include_top,
-            input_shape=self._default_input_shape(input_shape),
+            input_shape=self.input_shape_or_default(input_shape),
             **kwargs,
         )
 
+    def resolve(self, input_size: InputSize | None = None) -> tuple[keras.Model, PreprocessFunction, InputSize]:
+        size = input_size or self.input_size
+        h, w = size
+        return self.build(input_shape=(h, w, 3)), self.preprocess_input, size
 
-def keras_application(
-    key: str,
-    model_fn: ModelFactory,
-    preprocess_fn: PreprocessFunction,
-    input_size: InputSize,
-    description: str,
-    *,
-    keras_name: str | None = None,
-    default_weights: str | None = "imagenet",
-) -> KerasApplicationBackbone:
-    """Fabrica declarativa para backbones de ``keras.applications``."""
-    return KerasApplicationBackbone(
-        key=key,
-        keras_name=keras_name or key,
-        application=model_fn,
-        preprocess_fn=preprocess_fn,
-        input_size=input_size,
-        description=description,
-        default_weights=default_weights,
-    )
+    def coalesce_weights(self, weights) -> str | None:
+        return self.default_weights if weights is DEFAULT_WEIGHTS else weights
+
+    def input_shape_or_default(self, shape: tuple[int, int, int] | None) -> tuple[int, int, int]:
+        h, w = self.input_size
+        return shape or (h, w, 3)
+
+
+class ImagenetBackbone(Backbone):
+    default_weights = "imagenet"
+
+
+def get_backbone(name: str) -> Backbone:
+    return _REGISTRY[name]
+
+
+def resolve_backbone(name: str, input_size: InputSize | None = None) -> tuple[keras.Model, PreprocessFunction, InputSize]:
+    return get_backbone(name).resolve(input_size)

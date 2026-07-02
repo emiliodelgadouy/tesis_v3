@@ -1,46 +1,66 @@
-"""Backbones como objetos registrables; el provider solo reexporta el registro."""
-
-from .base import Backbone, DEFAULT_WEIGHTS, KerasApplicationBackbone, keras_application
+from .base import Backbone, DEFAULT_WEIGHTS
+from . import chexnet, custom_cnn, custom_tiny, efficientnet, efficientnet_v2, radimagenet, vgg
+from .base import BACKBONES, get_backbone, resolve_backbone
 from .chexnet import CheXNetBackbone
 from .custom_cnn import CustomCnnBackbone
 from .custom_tiny import CustomTinyBackbone
-from .mammoclip import MammoClipBackbone
-from .radimagenet import RadImageNetBackbone
-from .registry import (
-    BACKBONES,
-    BackboneConfig,
-    available_backbones,
-    build_backbone,
-    format_all_architecture_descriptions,
-    get_backbone,
-    get_backbone_config,
-    get_backbone_description,
-    get_input_size,
-    get_preprocess_input,
-    normalize_name,
-    resolve_backbone,
+from .efficientnet import (
+    EfficientNetB0Backbone,
+    EfficientNetB1Backbone,
+    EfficientNetB2Backbone,
+    EfficientNetB3Backbone,
+    EfficientNetB4Backbone,
+    EfficientNetB5Backbone,
+    EfficientNetB6Backbone,
+    EfficientNetB7Backbone,
 )
+from .efficientnet_v2 import (
+    EfficientNetV2B0Backbone,
+    EfficientNetV2B1Backbone,
+    EfficientNetV2B2Backbone,
+    EfficientNetV2B3Backbone,
+    EfficientNetV2LBackbone,
+    EfficientNetV2MBackbone,
+    EfficientNetV2SBackbone,
+)
+from .radimagenet import (
+    RadImageNetBackbone,
+    RadImageNetDenseNet121Backbone,
+    RadImageNetInceptionResNetV2Backbone,
+    RadImageNetInceptionV3Backbone,
+    RadImageNetResNet50Backbone,
+)
+from .vgg import VGG16Backbone, VGG19Backbone
 
 __all__ = [
     "BACKBONES",
     "Backbone",
-    "BackboneConfig",
     "DEFAULT_WEIGHTS",
-    "KerasApplicationBackbone",
     "CheXNetBackbone",
     "CustomCnnBackbone",
     "CustomTinyBackbone",
-    "MammoClipBackbone",
+    "EfficientNetB0Backbone",
+    "EfficientNetB1Backbone",
+    "EfficientNetB2Backbone",
+    "EfficientNetB3Backbone",
+    "EfficientNetB4Backbone",
+    "EfficientNetB5Backbone",
+    "EfficientNetB6Backbone",
+    "EfficientNetB7Backbone",
+    "EfficientNetV2B0Backbone",
+    "EfficientNetV2B1Backbone",
+    "EfficientNetV2B2Backbone",
+    "EfficientNetV2B3Backbone",
+    "EfficientNetV2LBackbone",
+    "EfficientNetV2MBackbone",
+    "EfficientNetV2SBackbone",
     "RadImageNetBackbone",
-    "available_backbones",
-    "build_backbone",
-    "format_all_architecture_descriptions",
+    "RadImageNetDenseNet121Backbone",
+    "RadImageNetInceptionResNetV2Backbone",
+    "RadImageNetInceptionV3Backbone",
+    "RadImageNetResNet50Backbone",
+    "VGG16Backbone",
+    "VGG19Backbone",
     "get_backbone",
-    "get_backbone_config",
-    "get_backbone_description",
-    "get_input_size",
-    "get_preprocess_input",
-    "keras_application",
-    "normalize_name",
     "resolve_backbone",
 ]

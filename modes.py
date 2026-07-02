@@ -1,8 +1,8 @@
-"""Modos de entrenamiento: SIMPLE | ABMIL | CLAM | HIGHRES."""
+"""Modos de entrenamiento: SIMPLE | ABMIL | HIGHRES."""
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "clam", "highres")
+TRAINING_MODES = ("simple", "abmil", "highres")
 
 # Entrada fija para MODE=highres (todos los backbones usan el mismo H×W).
 HIGHRES_INPUT_SIZE: tuple[int, int] = (512, 512)
@@ -23,11 +23,6 @@ MODE_DESCRIPTIONS: dict[str, str] = {
         "agregacion ponderada y clasificador a nivel imagen. Sin supervision "
         "explicita a nivel parche."
     ),
-    "clam": (
-        "CLAM-SB (Lu et al., 2021): atencion gated + clasificador de bag y "
-        "clustering a nivel instancia con pseudo-etiquetas en los parches mas y "
-        "menos atendidos (top-k / bottom-k). Perdida combinada bag + instancia."
-    ),
 }
 
 
@@ -41,7 +36,7 @@ def normalize_mode(name: str) -> str:
 
 
 def is_mil_mode(mode: str) -> bool:
-    return normalize_mode(mode) in ("abmil", "clam")
+    return normalize_mode(mode) == "abmil"
 
 
 def resolve_training_mode(
