@@ -2,6 +2,7 @@ from src.model_builder.abmil import AbmilModelBuilder
 from src.model_builder.base import BaseModelBuilder
 from src.model_builder.factory import create_model_builder
 from src.model_builder.highres import HighresModelBuilder
+from src.model_builder.patch import PatchModelBuilder
 from src.model_builder.layers import BagTiling, GatedAttentionPooling
 from src.model_builder.mil_base import MilModelBuilderBase
 from src.model_builder.simple import SimpleModelBuilder
@@ -14,6 +15,7 @@ __all__ = [
     "BaseModelBuilder",
     "GatedAttentionPooling",
     "HighresModelBuilder",
+    "PatchModelBuilder",
     "MilModelBuilderBase",
     "ModelBuilder",
     "SimpleModelBuilder",

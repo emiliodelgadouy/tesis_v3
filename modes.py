@@ -1,8 +1,8 @@
-"""Modos de entrenamiento: SIMPLE | ABMIL | HIGHRES."""
+"""Modos de entrenamiento: SIMPLE | ABMIL | HIGHRES | PATCH."""
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "highres")
+TRAINING_MODES = ("simple", "abmil", "highres", "patch")
 
 # Entrada fija para MODE=highres (todos los backbones usan el mismo H×W).
 HIGHRES_INPUT_SIZE: tuple[int, int] = (512, 512)
@@ -23,6 +23,11 @@ MODE_DESCRIPTIONS: dict[str, str] = {
         "agregacion ponderada y clasificador a nivel imagen. Sin supervision "
         "explicita a nivel parche."
     ),
+    "patch": (
+        "Clasificador de parches: backbone + GAP + MLP sobre crops (roi / "
+        "avoid_roi / uniforme segun etiqueta). Mismo grafo que SIMPLE; el "
+        "dataset activa patch_mode."
+    ),
 }
 
 
@@ -37,6 +42,10 @@ def normalize_mode(name: str) -> str:
 
 def is_mil_mode(mode: str) -> bool:
     return normalize_mode(mode) == "abmil"
+
+
+def is_patch_mode(mode: str) -> bool:
+    return normalize_mode(mode) == "patch"
 
 
 def resolve_training_mode(
@@ -88,11 +97,14 @@ def resolve_mode_kwargs(kwargs: dict) -> dict:
     """Extrae aliases legacy de kwargs y devuelve una copia con `mode` unificado."""
     out = dict(kwargs)
     mode = out.pop("mode", None)
+    patch_mode = out.pop("patch_mode", None)
     resolved = resolve_training_mode(
         mode=mode,
         mil_mode=out.pop("mil_mode", None),
         architecture_name=out.pop("architecture_name", None),
         bag_mode=out.pop("bag_mode", None),
     )
+    if patch_mode is True and resolved == "simple":
+        resolved = "patch"
     out["mode"] = resolved
     return out

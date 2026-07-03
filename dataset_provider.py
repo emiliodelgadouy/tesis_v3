@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from src.modes import is_mil_mode, normalize_mode, resolve_mode_kwargs
+from src.modes import is_mil_mode, is_patch_mode, normalize_mode, resolve_mode_kwargs
 
 SplitName = Literal["train", "val", "test"]
 PatchSampling = Literal["uniform", "normal"]
@@ -940,6 +940,8 @@ class DatasetProviderConfig:
         self.image_size = _normalize_size(self.image_size)
         self.bag_grid = (int(self.bag_grid[0]), int(self.bag_grid[1]))
         self.mode = normalize_mode(self.mode)
+        if is_patch_mode(self.mode):
+            self.patch_mode = True
 
     def with_overrides(self, **kwargs: Any) -> DatasetProviderConfig:
         return replace(self, **kwargs)
