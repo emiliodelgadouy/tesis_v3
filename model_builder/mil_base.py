@@ -82,5 +82,18 @@ class MilModelBuilderBase(BaseModelBuilder):
         self.model = self.wrap_model(inputs, outputs)
         return self.compile()
 
+    def _transfer_pretrained_instance_dense(self) -> None:
+        # backbone ya compartido via pretrained_builder; copiamos la cabeza densa patch → MIL
+        source = self.pretrained_builder
+        if source is None or source.model is None or self.model is None:
+            return
+        try:
+            dense_weights = source.model.get_layer("dense").get_weights()
+        except ValueError:
+            return
+        self.model.get_layer("td_instance_dense").layer.set_weights(dense_weights)
+
     def build(self):
-        return self.build_keras_tiling() if self.bag_keras_tiling else self.build_td_tiling()
+        result = self.build_keras_tiling() if self.bag_keras_tiling else self.build_td_tiling()
+        self._transfer_pretrained_instance_dense()
+        return result

@@ -11,7 +11,13 @@ from src.utils import EpochTimer, MemoryEpochLogger
 class BaseModelBuilder:
     model_name = "model"
 
-    def __init__(self, IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, focal_alpha=0.90, focal_gamma=2.0, metric_to_maximize="pr_auc", checkpoint_monitor=None, monitor_mode="max", early_stopping_patience=8, reduce_lr_patience=4, reduce_lr_factor=0.5, min_lr=1e-7, aggressive_augmentation=False, initial_bias=None):
+    def __init__(self, IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, focal_alpha=0.90, focal_gamma=2.0, metric_to_maximize="pr_auc", checkpoint_monitor=None, monitor_mode="max", early_stopping_patience=8, reduce_lr_patience=4, reduce_lr_factor=0.5, min_lr=1e-7, aggressive_augmentation=False, initial_bias=None, pretrained_builder=None):
+        self.pretrained_builder = pretrained_builder
+        if pretrained_builder is not None:
+            pretrained_builder.load_best_global_checkpoint()
+            IMG_SIZE = pretrained_builder.IMG_SIZE
+            backbone = pretrained_builder.backbone
+            preprocess_input = pretrained_builder.preprocess_input
         self.IMG_SIZE = IMG_SIZE
         self.backbone = backbone
         self.preprocess_input = preprocess_input
