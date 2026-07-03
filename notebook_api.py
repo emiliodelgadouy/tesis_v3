@@ -31,7 +31,7 @@ from src.comet_logging import (
     start_training_experiment,
 )
 from src.dataset import build_dataset
-from src.dataset_provider import as_tf_dataset, build_dataset_provider
+from src.dataset_provider import as_tf_dataset, build_dataset_provider, hard_negatives_from_positives
 from src.imports import get_device, set_seed
 from src.model_builder import ModelBuilder
 from src.plots import plot_history
@@ -76,6 +76,7 @@ __all__ = [
     "build_dataset",
     "as_tf_dataset",
     "build_dataset_provider",
+    "hard_negatives_from_positives",
     # imports
     "get_device",
     "set_seed",
