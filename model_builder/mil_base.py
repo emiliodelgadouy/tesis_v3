@@ -14,6 +14,18 @@ class MilModelBuilderBase(BaseModelBuilder):
         self.attention_gated = attention_gated
         self.bag_keras_tiling = bag_keras_tiling
 
+    def augmentation_seq(self):
+        # Augmentacion moderada: menos jitter que aggressive_augmentation porque
+        # el tiling fijo ya mueve el contenido entre tiles en cada transformacion.
+        return keras.Sequential([
+            layers.RandomFlip("horizontal", name="aug_flip_h"),
+            layers.RandomRotation(0.03, fill_mode="reflect", name="aug_rot"),
+            layers.RandomZoom(height_factor=(0.0, 0.10), width_factor=(0.0, 0.10), fill_mode="reflect", name="aug_zoom"),
+            layers.RandomTranslation(height_factor=0.10, width_factor=0.10, fill_mode="reflect", name="aug_translate"),
+            layers.RandomContrast(0.15, name="aug_contrast"),
+            layers.RandomBrightness(0.15, value_range=(0.0, 255.0), name="aug_brightness"),
+        ], name="augmentation_mil")
+
     def mil_inputs(self):
         # bag de K parches (K, H, W, 3) — el dataset ya arma los tiles
         return keras.Input(shape=(self.bag_size, self.IMG_SIZE[0], self.IMG_SIZE[1], 3), name="bag")

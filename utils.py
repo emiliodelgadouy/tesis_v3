@@ -218,11 +218,18 @@ def undersample_negatives(
     return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
+def _flip_inputs_tta(x: tf.Tensor) -> tf.Tensor:
+    """Flip horizontal para imagen (B,H,W,C) o bag MIL pre-tiled (B,K,H,W,C)."""
+    if x.shape.rank == 5:
+        return tf.reverse(x, axis=[3])
+    return tf.image.flip_left_right(x)
+
+
 def predict_probabilities_tta(model, dataset) -> np.ndarray:
     """TTA por flip horizontal: promedia probabilidades de imagen normal + espejada."""
     base = _eval_tf_dataset(dataset)
     flipped = base.map(
-        lambda x, y: (tf.image.flip_left_right(x), y),
+        lambda x, y: (_flip_inputs_tta(x), y),
         num_parallel_calls=1,
     )
     p_base = _sigmoid(model.predict(base, verbose=0).reshape(-1))
