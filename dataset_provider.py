@@ -828,6 +828,16 @@ def positive_only_mixup_batch(
     return out_images, out_labels
 
 
+def _dataset_deterministic_options(ds: tf.data.Dataset) -> tf.data.Dataset:
+    """Orden estable para eval, TTA y alineacion con tablas fuente."""
+    opts = tf.data.Options()
+    if hasattr(opts, "deterministic"):
+        opts.deterministic = True
+    elif hasattr(opts, "experimental_deterministic"):
+        opts.experimental_deterministic = True
+    return ds.with_options(opts)
+
+
 def _dataset_perf_options(ds: tf.data.Dataset) -> tf.data.Dataset:
     opts = tf.data.Options()
     if hasattr(opts, "deterministic"):
@@ -1901,7 +1911,7 @@ class DatasetProvider:
         else:
             ordered_processed = processed
 
-        ordered_batched = _dataset_perf_options(
+        ordered_batched = _dataset_deterministic_options(
             ordered_processed.batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
         )
 

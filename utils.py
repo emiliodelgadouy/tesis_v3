@@ -152,9 +152,16 @@ def _sigmoid(z) -> np.ndarray:
     return np.where(z >= 0, 1 / (1 + np.exp(-z)), np.exp(z) / (1 + np.exp(z)))
 
 
+def _eval_tf_dataset(dataset):
+    """Vista ordenada y estable para evaluacion (InspectDataset o tf.data)."""
+    if hasattr(dataset, "ordered"):
+        return as_tf_dataset(dataset.ordered())
+    return as_tf_dataset(dataset)
+
+
 def labels_from_tf_dataset(dataset) -> np.ndarray:
     return np.concatenate(
-        [np.asarray(yb, dtype=np.int64).reshape(-1) for _, yb in dataset]
+        [np.asarray(yb, dtype=np.int64).reshape(-1) for _, yb in _eval_tf_dataset(dataset)]
     )
 
 
@@ -213,10 +220,10 @@ def undersample_negatives(
 
 def predict_probabilities_tta(model, dataset) -> np.ndarray:
     """TTA por flip horizontal: promedia probabilidades de imagen normal + espejada."""
-    base = as_tf_dataset(dataset)
+    base = _eval_tf_dataset(dataset)
     flipped = base.map(
         lambda x, y: (tf.image.flip_left_right(x), y),
-        num_parallel_calls=tf.data.AUTOTUNE,
+        num_parallel_calls=1,
     )
     p_base = _sigmoid(model.predict(base, verbose=0).reshape(-1))
     p_flip = _sigmoid(model.predict(flipped, verbose=0).reshape(-1))
@@ -282,10 +289,10 @@ def binary_report(y_true, y_prob, threshold: float, *, title: str = "") -> dict:
 
 
 def warmup(model, train_ds) -> float:
-    """Un step dummy para disparar la compilacion del grafo antes de model.fit()."""
+    """Un paso forward-only para compilar el grafo antes de model.fit() (sin actualizar pesos)."""
     t0 = time.perf_counter()
-    xb, yb = next(iter(as_tf_dataset(train_ds)))
-    model.model.train_on_batch(xb, yb)
+    xb, _ = next(iter(as_tf_dataset(train_ds)))
+    model.model.predict_on_batch(xb)
     elapsed = time.perf_counter() - t0
     print(f"  Warm-up completado en {elapsed:.1f}s")
     return elapsed

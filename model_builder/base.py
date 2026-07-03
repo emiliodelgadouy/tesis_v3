@@ -111,7 +111,7 @@ class BaseModelBuilder:
             self.keep_batch_norm_frozen()
         if learning_rate is not None:
             self.learning_rate = learning_rate
-        return eself.compile()
+        return self.compile()
 
     def make_backbone_partially_trainable(self, trainable_fraction=0.30, learning_rate=None, train_batch_norm=False):
         # descongela solo el ultimo % de capas del backbone
