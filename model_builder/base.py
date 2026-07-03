@@ -5,7 +5,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 from src.dataset_provider import as_tf_dataset
-from src.utils import EpochTimer
+from src.utils import EpochTimer, MemoryEpochLogger
 
 
 class BaseModelBuilder:
@@ -185,7 +185,13 @@ class BaseModelBuilder:
         return keras.callbacks.ReduceLROnPlateau(monitor=self.checkpoint_monitor, mode=self.monitor_mode, factor=self.reduce_lr_factor, patience=self.reduce_lr_patience, min_lr=self.min_lr, verbose=1)
 
     def callbacks(self, training_timer=None):
-        return [self.checkpoint_callback(), self.early_stopping_callback(), self.reduce_lr_callback(), EpochTimer(training_timer=training_timer)]
+        return [
+            self.checkpoint_callback(),
+            self.early_stopping_callback(),
+            self.reduce_lr_callback(),
+            EpochTimer(training_timer=training_timer),
+            MemoryEpochLogger(),
+        ]
 
     def fit(self, train_ds, val_ds, epochs=5, callbacks=None, training_timer=None):
         # entrena una etapa (frozen / partial / full) y trackea checkpoints por stage

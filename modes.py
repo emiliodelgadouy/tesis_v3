@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "highres", "patch")
+TRAINING_MODES = ("simple", "abmil", "highres", "patch", "patch_hardneg")
+
+# Clave sin guiones ni underscores (ver normalize_mode).
+_NORMALIZED_TO_MODE = {
+    "simple": "simple",
+    "abmil": "abmil",
+    "highres": "highres",
+    "patch": "patch",
+    "patchhardneg": "patch_hardneg",
+}
 
 # Entrada fija para MODE=highres (todos los backbones usan el mismo H×W).
 HIGHRES_INPUT_SIZE: tuple[int, int] = (512, 512)
@@ -26,15 +35,21 @@ MODE_DESCRIPTIONS: dict[str, str] = {
     "patch": (
         "Clasificador de parches: backbone + GAP + MLP sobre crops (roi / "
         "avoid_roi / uniforme segun etiqueta). Mismo grafo que SIMPLE; el "
-        "dataset activa patch_mode."
+        "dataset activa patch_mode. Train con positivos + randneg."
+    ),
+    "patch_hardneg": (
+        "Igual que PATCH (mismo grafo y patch_mode) pero el train mezcla "
+        "positivos, hard negatives (misma imagen con hallazgo, etiqueta 0) "
+        "y randneg, tipicamente repartiendo el balance neg:pos entre ambos tipos."
     ),
 }
 
 
 def normalize_mode(name: str) -> str:
     key = name.strip().lower().replace("-", "").replace("_", "")
-    if key in MODE_DESCRIPTIONS:
-        return key
+    mode = _NORMALIZED_TO_MODE.get(key)
+    if mode is not None:
+        return mode
     raise ValueError(
         f"MODE '{name}' no disponible. Opciones: {', '.join(m.upper() for m in TRAINING_MODES)}"
     )
@@ -45,7 +60,7 @@ def is_mil_mode(mode: str) -> bool:
 
 
 def is_patch_mode(mode: str) -> bool:
-    return normalize_mode(mode) == "patch"
+    return normalize_mode(mode) in ("patch", "patch_hardneg")
 
 
 def resolve_training_mode(

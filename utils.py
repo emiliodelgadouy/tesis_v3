@@ -23,7 +23,9 @@ from src.dataset_provider import apply_clahe_tf, as_tf_dataset, decode_image
 
 __all__ = [
     "EpochTimer",
+    "MemoryEpochLogger",
     "TrainingTimer",
+    "sample_memory_usage",
     "run_training_stage",
     "apply_clahe_tf",
     "apply_probability_threshold",
@@ -349,6 +351,37 @@ class TrainingTimer:
         }
         self.stage_summaries[stage] = summary
         return summary
+
+
+def sample_memory_usage() -> dict[str, float]:
+    """RAM del proceso y VRAM de GPU:0 en GB. Omite metricas no disponibles."""
+    metrics: dict[str, float] = {}
+
+    try:
+        import psutil
+
+        metrics["ram_rss_gb"] = psutil.Process().memory_info().rss / (1024**3)
+    except Exception:
+        pass
+
+    try:
+        if tf.config.list_physical_devices("GPU"):
+            info = tf.config.experimental.get_memory_info("GPU:0")
+            metrics["vram_current_gb"] = info["current"] / (1024**3)
+            metrics["vram_peak_gb"] = info["peak"] / (1024**3)
+    except Exception:
+        pass
+
+    return metrics
+
+
+class MemoryEpochLogger(keras.callbacks.Callback):
+    """Anade uso de RAM/VRAM a logs al final de cada epoca (Comet los recoge via CometEpochLogger)."""
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            return
+        logs.update(sample_memory_usage())
 
 
 class EpochTimer(keras.callbacks.Callback):

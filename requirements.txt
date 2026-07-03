@@ -7,3 +7,4 @@ gsutil
 scikit-learn
 gdown>=5.1
 comet_ml
+psutil>=5.9
