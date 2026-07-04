@@ -33,6 +33,7 @@ from src.comet_logging import (
 from src.dataset import build_dataset
 from src.dataset_provider import as_tf_dataset, build_dataset_provider, hard_negatives_from_positives
 from src.imports import get_device, set_seed
+from src.modes import normalize_mode
 from src.model_builder import ModelBuilder
 from src.plots import plot_history
 from src.utils import (
@@ -80,6 +81,7 @@ __all__ = [
     # imports
     "get_device",
     "set_seed",
+    "normalize_mode",
     # model_builder
     "ModelBuilder",
     # plots
