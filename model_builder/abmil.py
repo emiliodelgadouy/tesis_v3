@@ -12,3 +12,12 @@ class AbmilModelBuilder(MilModelBuilderBase):
     def build_keras_tiling(self):
         self.model_name = "abmil_keras_tiling"
         return super().build_keras_tiling()
+
+
+class AbmilPatchHardnegModelBuilder(AbmilModelBuilder):
+    model_name = "abmil_patch_hardneg"
+
+    def build(self):
+        if self.pretrained_builder is None:
+            raise ValueError("abmil_patch_hardneg requiere pretrained_builder entrenado en patch_hardneg")
+        return super().build()

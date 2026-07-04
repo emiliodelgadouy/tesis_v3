@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import time
 from typing import Literal
 
@@ -19,7 +20,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
 from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS
-from src.dataset_provider import apply_clahe_tf, as_tf_dataset, decode_image
+from src.dataset_provider import apply_clahe_tf, as_tf_dataset, decode_image, hard_negatives_from_positives
 
 __all__ = [
     "EpochTimer",
@@ -32,11 +33,14 @@ __all__ = [
     "binary_report",
     "decode_image",
     "deduplicate_images",
+    "dispose_model_builder",
     "labels_from_tf_dataset",
     "logit_initial_bias",
     "plot_binary_confusion_matrix",
     "predict_probabilities",
     "predict_probabilities_tta",
+    "release_gpu_memory",
+    "resample_train_for_patch",
     "stratified_split",
     "threshold_best_f1",
     "threshold_max_recall",
@@ -220,6 +224,41 @@ def undersample_negatives(
     return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
+def resample_train_for_patch(
+    train_df: pd.DataFrame,
+    patch_ratio: dict[str, int | float],
+    seed: int,
+    *,
+    label_column: str = "cls",
+) -> tuple[pd.DataFrame, float, float]:
+    """Remuestrea train en positivos + hard negatives + random negatives segun patch_ratio.
+
+    ``patch_ratio`` usa claves POSITIVE, HARD_NEGATIVE y RANDOM_NEGATIVE (multiplicadores
+    respecto del conteo de positivos). Devuelve (df, focal_alpha, initial_bias).
+    """
+    positive_train = train_df[train_df[label_column] == 1].copy()
+    negative_pool = train_df[train_df[label_column] == 0].copy()
+    n_positive = len(positive_train)
+
+    def _resample(df: pd.DataFrame, n: int) -> pd.DataFrame:
+        n = int(round(n))
+        if n <= 0 or len(df) == 0:
+            return df.iloc[0:0]
+        if n <= len(df):
+            return df.sample(n=n, random_state=seed)
+        reps = pd.concat([df] * (n // len(df) + 1), ignore_index=True)
+        return reps.sample(n=n, random_state=seed)
+
+    positive_final = _resample(positive_train, n_positive * patch_ratio["POSITIVE"])
+    hard_negative_final = _resample(hard_negatives_from_positives(positive_train), n_positive * patch_ratio["HARD_NEGATIVE"])
+    random_negative_final = _resample(negative_pool, n_positive * patch_ratio["RANDOM_NEGATIVE"])
+    train_patch = pd.concat([positive_final, hard_negative_final, random_negative_final], ignore_index=True).sample(frac=1, random_state=seed).reset_index(drop=True)
+    frac_neg = (train_patch[label_column] == 0).sum() / len(train_patch)
+    bias = logit_initial_bias(int((train_patch[label_column] == 1).sum()), int((train_patch[label_column] == 0).sum()))
+    print("resample_train_for_patch:", {"POSITIVE": len(positive_final), "HARD_NEGATIVE": len(hard_negative_final), "RANDOM_NEGATIVE": len(random_negative_final), "TOTAL": len(train_patch), "FRAC_NEG": round(float(frac_neg), 3)})
+    return train_patch, float(frac_neg), bias
+
+
 def _flip_inputs_tta(x: tf.Tensor) -> tf.Tensor:
     """Flip horizontal para imagen (B,H,W,C) o bag MIL pre-tiled (B,K,H,W,C)."""
     if x.shape.rank == 5:
@@ -305,6 +344,26 @@ def warmup(model, train_ds) -> float:
     elapsed = time.perf_counter() - t0
     print(f"  Warm-up completado en {elapsed:.1f}s")
     return elapsed
+
+
+def release_gpu_memory(*, clear_keras_session: bool = True) -> None:
+    """Libera VRAM/RAM entre experimentos.
+
+    Usar ``clear_keras_session=False`` solo si un builder activo se reutiliza
+    inmediatamente después (p. ej. patch_hardneg exitoso → abmil_patch_hardneg).
+    """
+    if clear_keras_session:
+        tf.keras.backend.clear_session()
+    gc.collect()
+
+
+def dispose_model_builder(builder_obj) -> None:
+    """Rompe referencias internas de un builder para que gc libere tras clear_session."""
+    if builder_obj is None:
+        return
+    builder_obj.model = None
+    builder_obj.backbone = None
+    builder_obj.pretrained_builder = None
 
 
 class TrainingTimer:

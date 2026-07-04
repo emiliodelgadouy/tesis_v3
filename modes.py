@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "highres", "patch", "patch_hardneg")
+TRAINING_MODES = ("simple", "abmil", "abmil_patch_hardneg", "highres", "patch", "patch_hardneg")
 
 # Clave sin guiones ni underscores (ver normalize_mode).
 _NORMALIZED_TO_MODE = {
     "simple": "simple",
     "abmil": "abmil",
+    "abmilpatchhardneg": "abmil_patch_hardneg",
     "highres": "highres",
     "patch": "patch",
     "patchhardneg": "patch_hardneg",
@@ -31,6 +32,10 @@ MODE_DESCRIPTIONS: dict[str, str] = {
         "ABMIL (Ilse et al., 2018): atencion gated sobre instancias del bag, "
         "agregacion ponderada y clasificador a nivel imagen. Sin supervision "
         "explicita a nivel parche."
+    ),
+    "abmil_patch_hardneg": (
+        "ABMIL con encoder inicializado desde un PatchModelBuilder patch_hardneg "
+        "preentrenado (backbone + cabeza densa de instancia transferidos)."
     ),
     "patch": (
         "Clasificador de parches: backbone + GAP + MLP sobre crops (roi / "
@@ -56,7 +61,7 @@ def normalize_mode(name: str) -> str:
 
 
 def is_mil_mode(mode: str) -> bool:
-    return normalize_mode(mode) == "abmil"
+    return normalize_mode(mode) in ("abmil", "abmil_patch_hardneg")
 
 
 def is_patch_mode(mode: str) -> bool:
