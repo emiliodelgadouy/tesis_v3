@@ -11,7 +11,7 @@ from src.utils import EpochTimer, MemoryEpochLogger
 class BaseModelBuilder:
     model_name = "model"
 
-    def __init__(self, IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, focal_alpha=0.90, focal_gamma=2.0, metric_to_maximize="pr_auc", checkpoint_monitor=None, monitor_mode="max", early_stopping_patience=8, reduce_lr_patience=4, reduce_lr_factor=0.5, min_lr=1e-7, aggressive_augmentation=False, initial_bias=None, pretrained_builder=None):
+    def __init__(self, IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, focal_alpha=0.90, focal_gamma=2.0, metric_to_maximize="pr_auc", checkpoint_monitor=None, monitor_mode="max", early_stopping_patience=8, reduce_lr_patience=4, reduce_lr_factor=0.5, min_lr=1e-7, aggressive_augmentation=False, initial_bias=None, pretrained_builder=None, jit_compile=True, steps_per_execution=32):
         self.pretrained_builder = pretrained_builder
         if pretrained_builder is not None:
             pretrained_builder.load_best_global_checkpoint()
@@ -44,6 +44,8 @@ class BaseModelBuilder:
         self.fit_number = 0
         self.best_checkpoints = []
         self.initial_bias = initial_bias
+        self.jit_compile = jit_compile
+        self.steps_per_execution = steps_per_execution
         self.loss_from_logits = True
         self.model = None
 
@@ -135,7 +137,13 @@ class BaseModelBuilder:
         return self.compile()
 
     def compile(self):
-        self.model.compile(optimizer=self.optimizer(), loss=self.focal_loss(), metrics=self.metrics(), jit_compile=False)
+        self.model.compile(
+            optimizer=self.optimizer(),
+            loss=self.focal_loss(),
+            metrics=self.metrics(),
+            jit_compile=self.jit_compile,
+            steps_per_execution=self.steps_per_execution,
+        )
         return self
 
     def build(self):

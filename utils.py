@@ -232,7 +232,7 @@ def predict_probabilities_tta(model, dataset) -> np.ndarray:
     base = _eval_tf_dataset(dataset)
     flipped = base.map(
         lambda x, y: (_flip_inputs_tta(x), y),
-        num_parallel_calls=1,
+        num_parallel_calls=tf.data.AUTOTUNE,
     )
     p_base = _sigmoid(model.predict(base, verbose=0).reshape(-1))
     p_flip = _sigmoid(model.predict(flipped, verbose=0).reshape(-1))
