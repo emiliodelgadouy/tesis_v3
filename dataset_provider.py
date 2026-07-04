@@ -1898,18 +1898,27 @@ class DatasetProvider:
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
-        if self.config.cache_filename is not None:
-            cache_path = Path(self.config.cache_filename)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            processed = processed.cache(str(cache_path))
-        elif self.config.cache_dataset:
-            processed = processed.cache()
+        # En patch + crop aleatorio, cache() congelaria el primer crop por epoca.
+        cache_random_crops = self.config.patch_mode and random_patch
+        if not cache_random_crops:
+            if self.config.cache_filename is not None:
+                cache_path = Path(self.config.cache_filename)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                processed = processed.cache(str(cache_path))
+            elif self.config.cache_dataset:
+                processed = processed.cache()
 
         if self.config.patch_mode and shuffle:
             ordered_processed = base.map(
                 self._make_process_fn(random_patch=False),
                 num_parallel_calls=tf.data.AUTOTUNE,
             )
+            if self.config.cache_filename is not None:
+                ordered_cache = Path(str(self.config.cache_filename) + ".ordered")
+                ordered_cache.parent.mkdir(parents=True, exist_ok=True)
+                ordered_processed = ordered_processed.cache(str(ordered_cache))
+            elif self.config.cache_dataset:
+                ordered_processed = ordered_processed.cache()
         else:
             ordered_processed = processed
 

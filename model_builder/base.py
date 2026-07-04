@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import tensorflow as tf
 from tensorflow import keras
@@ -8,10 +9,15 @@ from src.dataset_provider import as_tf_dataset
 from src.utils import EpochTimer, MemoryEpochLogger
 
 
+def _sanitize_checkpoint_prefix(name: str) -> str:
+    slug = re.sub(r"[^\w.\-]+", "_", str(name).strip())
+    return slug.strip("_") or "run"
+
+
 class BaseModelBuilder:
     model_name = "model"
 
-    def __init__(self, IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, focal_alpha=0.90, focal_gamma=2.0, metric_to_maximize="pr_auc", checkpoint_monitor=None, monitor_mode="max", early_stopping_patience=8, reduce_lr_patience=4, reduce_lr_factor=0.5, min_lr=1e-7, aggressive_augmentation=False, initial_bias=None, pretrained_builder=None, jit_compile=True, steps_per_execution=32):
+    def __init__(self, IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, focal_alpha=0.90, focal_gamma=2.0, metric_to_maximize="pr_auc", checkpoint_monitor=None, monitor_mode="max", early_stopping_patience=8, reduce_lr_patience=4, reduce_lr_factor=0.5, min_lr=1e-7, aggressive_augmentation=False, initial_bias=None, pretrained_builder=None, jit_compile=True, steps_per_execution=32, checkpoint_prefix=None, lateralized_inputs=False):
         self.pretrained_builder = pretrained_builder
         if pretrained_builder is not None:
             pretrained_builder.load_best_global_checkpoint()
@@ -46,6 +52,10 @@ class BaseModelBuilder:
         self.initial_bias = initial_bias
         self.jit_compile = jit_compile
         self.steps_per_execution = steps_per_execution
+        self.checkpoint_prefix = (
+            _sanitize_checkpoint_prefix(checkpoint_prefix) if checkpoint_prefix else None
+        )
+        self.lateralized_inputs = lateralized_inputs
         self.loss_from_logits = True
         self.model = None
 
@@ -60,19 +70,23 @@ class BaseModelBuilder:
 
     def augmentation_seq(self):
         # augmentacion de entrenamiento, agresiva o suave segun config
+        layers_list: list[layers.Layer] = []
+        if not self.lateralized_inputs:
+            layers_list.append(layers.RandomFlip("horizontal", name="aug_flip_h"))
         if self.aggressive_augmentation:
-            return keras.Sequential([
-                layers.RandomFlip("horizontal", name="aug_flip_h"),
+            layers_list.extend([
                 layers.RandomRotation(0.14, fill_mode="reflect", name="aug_rot"),
                 layers.RandomZoom(height_factor=(0.0, 0.22), width_factor=(0.0, 0.22), fill_mode="reflect", name="aug_zoom"),
                 layers.RandomTranslation(height_factor=0.14, width_factor=0.14, fill_mode="reflect", name="aug_translate"),
                 layers.RandomContrast(0.25, name="aug_contrast"),
                 layers.RandomBrightness(0.25, value_range=(0.0, 255.0), name="aug_brightness"),
-            ], name="augmentation_aggressive")
-        return keras.Sequential([
+            ])
+            return keras.Sequential(layers_list, name="augmentation_aggressive")
+        layers_list.extend([
             layers.RandomContrast(0.08),
             layers.RandomBrightness(0.08, value_range=(0.0, 255.0)),
-        ], name="augmentation")
+        ])
+        return keras.Sequential(layers_list, name="augmentation")
 
     def augmentation(self, x):
         return self.augmentation_seq()(x)
@@ -95,7 +109,14 @@ class BaseModelBuilder:
         return keras.optimizers.Adam(learning_rate=self.learning_rate)
 
     def focal_loss(self):
-        return keras.losses.BinaryFocalCrossentropy(apply_class_balancing=True, alpha=self.focal_alpha, gamma=self.focal_gamma, from_logits=self.loss_from_logits)
+        # alpha ya refleja el balance del train (undersample/resample); no duplicar
+        # con apply_class_balancing, que reponderaria otra vez por batch.
+        return keras.losses.BinaryFocalCrossentropy(
+            apply_class_balancing=False,
+            alpha=self.focal_alpha,
+            gamma=self.focal_gamma,
+            from_logits=self.loss_from_logits,
+        )
 
     def metrics(self):
         threshold = 0.0 if self.loss_from_logits else 0.5
@@ -210,7 +231,12 @@ class BaseModelBuilder:
     def fit(self, train_ds, val_ds, epochs=5, callbacks=None, training_timer=None):
         # entrena una etapa (frozen / partial / full) y trackea checkpoints por stage
         self.fit_number += 1
-        self.checkpoint_path = self.checkpoint_dir / f"stage_{self.fit_number}.weights.h5"
+        stage_stem = (
+            f"{self.checkpoint_prefix}_stage_{self.fit_number}"
+            if self.checkpoint_prefix
+            else f"stage_{self.fit_number}"
+        )
+        self.checkpoint_path = self.checkpoint_dir / f"{stage_stem}.weights.h5"
         return self.model.fit(as_tf_dataset(train_ds), validation_data=as_tf_dataset(val_ds), epochs=epochs, callbacks=self.callbacks(training_timer=training_timer) + list(callbacks or []))
 
     def load_best_checkpoint(self):

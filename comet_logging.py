@@ -40,6 +40,19 @@ def login(*, api_key: str | None = None) -> None:
         comet_ml.login()
 
 
+def _prefixed_epoch_metrics(logs: dict[str, float]) -> dict[str, float]:
+    """Prefija metricas de entrenamiento con train_ (val_* y train_* se mantienen)."""
+    out: dict[str, float] = {}
+    for key, value in logs.items():
+        if value is None:
+            continue
+        if key.startswith("val_") or key.startswith("train_"):
+            out[key] = float(value)
+        else:
+            out[f"train_{key}"] = float(value)
+    return out
+
+
 class CometEpochLogger(keras.callbacks.Callback):
     """Loguea metricas de Keras en Comet indexadas por epoch global (no por batch step)."""
 
@@ -56,7 +69,7 @@ class CometEpochLogger(keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
-        metrics = {k: float(v) for k, v in logs.items() if v is not None}
+        metrics = _prefixed_epoch_metrics(logs)
         global_epoch = self.epoch_offset + epoch + 1
         if self.stage is not None:
             self.experiment.log_metric(

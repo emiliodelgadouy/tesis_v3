@@ -20,7 +20,19 @@ from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
 from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS
-from src.dataset_provider import apply_clahe_tf, as_tf_dataset, decode_image, hard_negatives_from_positives
+from src.dataset_provider import (
+    apply_clahe_tf,
+    as_tf_dataset,
+    decode_image,
+    hard_negatives_from_positives,
+)
+
+DEFAULT_ROI_NORM_COLUMNS: tuple[str, str, str, str] = (
+    "pad_resized_xmin_norm",
+    "pad_resized_ymin_norm",
+    "pad_resized_xmax_norm",
+    "pad_resized_ymax_norm",
+)
 
 __all__ = [
     "EpochTimer",
@@ -41,6 +53,7 @@ __all__ = [
     "predict_probabilities_tta",
     "release_gpu_memory",
     "resample_train_for_patch",
+    "resolve_steps_per_execution",
     "stratified_split",
     "threshold_best_f1",
     "threshold_max_recall",
@@ -59,9 +72,15 @@ def deduplicate_images(
     path_column: str = "path",
     label_column: str = "cls",
     flag_columns: tuple[str, ...] | None = None,
+    roi_norm_columns: tuple[str, str, str, str] = DEFAULT_ROI_NORM_COLUMNS,
     keep: Literal["first", "last"] = "first",
 ) -> pd.DataFrame:
-    """One row per image: collapse CSV rows with multiple findings/boxes."""
+    """One row per image: collapse CSV rows with multiple findings/boxes.
+
+    Las columnas ROI (xmin/ymin/xmax/ymax normalizados) se agregan como union
+    del bounding box (min en mins, max en maxs) para que avoid_roi evite todas
+    las anotaciones de la imagen, no solo la primera fila.
+    """
     if df.empty:
         return df.copy()
 
@@ -100,6 +119,16 @@ def deduplicate_images(
     for col in flag_columns:
         if col in out.columns:
             agg[col] = "max"
+
+    xmin_c, ymin_c, xmax_c, ymax_c = roi_norm_columns
+    if xmin_c in out.columns:
+        agg[xmin_c] = "min"
+    if ymin_c in out.columns:
+        agg[ymin_c] = "min"
+    if xmax_c in out.columns:
+        agg[xmax_c] = "max"
+    if ymax_c in out.columns:
+        agg[ymax_c] = "max"
 
     for col in out.columns:
         if col not in agg:
@@ -151,6 +180,17 @@ def stratified_split(
 
 def logit_initial_bias(n_positive: int, n_negative: int) -> float:
     return float(np.log(n_positive / n_negative))
+
+
+def resolve_steps_per_execution(
+    n_rows: int,
+    batch_size: int,
+    *,
+    max_steps: int = 32,
+) -> int:
+    """Acota steps_per_execution al numero real de batches por epoca."""
+    steps_per_epoch = max(1, (int(n_rows) + int(batch_size) - 1) // int(batch_size))
+    return max(1, min(int(max_steps), steps_per_epoch))
 
 
 def _sigmoid(z) -> np.ndarray:

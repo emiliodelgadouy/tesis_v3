@@ -17,14 +17,17 @@ class MilModelBuilderBase(BaseModelBuilder):
     def augmentation_seq(self):
         # Augmentacion moderada: menos jitter que aggressive_augmentation porque
         # el tiling fijo ya mueve el contenido entre tiles en cada transformacion.
-        return keras.Sequential([
-            layers.RandomFlip("horizontal", name="aug_flip_h"),
+        layers_list: list[layers.Layer] = []
+        if not self.lateralized_inputs:
+            layers_list.append(layers.RandomFlip("horizontal", name="aug_flip_h"))
+        layers_list.extend([
             layers.RandomRotation(0.03, fill_mode="reflect", name="aug_rot"),
             layers.RandomZoom(height_factor=(0.0, 0.10), width_factor=(0.0, 0.10), fill_mode="reflect", name="aug_zoom"),
             layers.RandomTranslation(height_factor=0.10, width_factor=0.10, fill_mode="reflect", name="aug_translate"),
             layers.RandomContrast(0.15, name="aug_contrast"),
             layers.RandomBrightness(0.15, value_range=(0.0, 255.0), name="aug_brightness"),
-        ], name="augmentation_mil")
+        ])
+        return keras.Sequential(layers_list, name="augmentation_mil")
 
     def mil_inputs(self):
         # bag de K parches (K, H, W, 3) — el dataset ya arma los tiles
