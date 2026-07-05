@@ -109,10 +109,13 @@ class BaseModelBuilder:
         return keras.optimizers.Adam(learning_rate=self.learning_rate)
 
     def focal_loss(self):
-        # alpha ya refleja el balance del train (undersample/resample); no duplicar
-        # con apply_class_balancing, que reponderaria otra vez por batch.
+        # apply_class_balancing=True es imprescindible: sin el, Keras ignora alpha
+        # y la clase positiva pierde ponderacion (el modelo colapsa a negativo).
+        # alpha pesa la clase 1 (positiva) y 1-alpha la clase 0; con
+        # focal_alpha=frac_negativos, los positivos quedan upweighted para
+        # compensar el desbalance residual tras el undersample/resample.
         return keras.losses.BinaryFocalCrossentropy(
-            apply_class_balancing=False,
+            apply_class_balancing=True,
             alpha=self.focal_alpha,
             gamma=self.focal_gamma,
             from_logits=self.loss_from_logits,
