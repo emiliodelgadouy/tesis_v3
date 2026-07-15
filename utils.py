@@ -51,6 +51,7 @@ __all__ = [
     "plot_binary_confusion_matrix",
     "predict_probabilities",
     "predict_probabilities_tta",
+    "predict_probs_and_labels",
     "release_gpu_memory",
     "resample_train_for_patch",
     "resolve_steps_per_execution",
@@ -214,6 +215,40 @@ def labels_from_tf_dataset(dataset) -> np.ndarray:
 def predict_probabilities(model, dataset, *, verbose: int = 1) -> np.ndarray:
     logits = model.predict(dataset, verbose=verbose).astype(np.float64).reshape(-1)
     return _sigmoid(logits)
+
+
+def predict_probs_and_labels(model, dataset, *, use_tta: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """Una sola pasada sobre el dataset: devuelve (y_true, y_prob) alineados.
+
+    Reemplaza el par ``labels_from_tf_dataset`` + ``predict_probabilities``, que
+    recorre el pipeline ``tf.data`` dos veces (decodificando/croppeando las
+    imagenes en cada pasada). Aca se itera una sola vez, tomando labels y logits
+    del mismo batch. Con ``use_tta=True`` promedia la prediccion con su espejo
+    horizontal (segunda pasada solo si TTA esta activo).
+    """
+    eval_ds = _eval_tf_dataset(dataset)
+    keras_model = model.model if hasattr(model, "model") else model
+
+    labels_batches: list[np.ndarray] = []
+    logits_batches: list[np.ndarray] = []
+    flip_logits_batches: list[np.ndarray] = []
+    for xb, yb in eval_ds:
+        labels_batches.append(np.asarray(yb, dtype=np.int64).reshape(-1))
+        logits_batches.append(
+            np.asarray(keras_model.predict_on_batch(xb), dtype=np.float64).reshape(-1)
+        )
+        if use_tta:
+            flip_logits_batches.append(
+                np.asarray(
+                    keras_model.predict_on_batch(_flip_inputs_tta(xb)), dtype=np.float64
+                ).reshape(-1)
+            )
+
+    y_true = np.concatenate(labels_batches)
+    y_prob = _sigmoid(np.concatenate(logits_batches))
+    if use_tta:
+        y_prob = (y_prob + _sigmoid(np.concatenate(flip_logits_batches))) / 2.0
+    return y_true, y_prob
 
 
 def apply_probability_threshold(y_prob, threshold: float) -> np.ndarray:

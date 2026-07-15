@@ -740,7 +740,13 @@ def _offset_from_center(
         max_f,
     )
     if random_jitter:
-        std = tf.maximum(tf.cast(sigma_frac, tf.float32) * max_f, 1.0)
+        # Jitter relativo al tamaño del parche (no al rango de scroll de la imagen):
+        # asi la lesion se descentra un poco pero sigue quedando dentro del parche.
+        # Se acota a max_f para no proponer offsets fuera de la imagen.
+        std = tf.minimum(
+            tf.maximum(tf.cast(sigma_frac, tf.float32) * tf.cast(patch_size, tf.float32), 1.0),
+            tf.maximum(max_f, 1.0),
+        )
         offset = tf.random.normal([]) * std + ideal
         return tf.cast(tf.round(tf.clip_by_value(offset, 0.0, max_f)), tf.int32)
     return tf.cast(tf.round(ideal), tf.int32)
