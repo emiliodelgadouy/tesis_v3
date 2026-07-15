@@ -35,7 +35,7 @@ MODE_DESCRIPTIONS: dict[str, str] = {
     ),
     "abmil_patch_hardneg": (
         "ABMIL con encoder inicializado desde un PatchModelBuilder patch_hardneg "
-        "preentrenado (backbone + cabeza densa de instancia transferidos)."
+        "preentrenado (backbone + proyeccion densa + clasificador transferidos)."
     ),
     "patch": (
         "Clasificador de parches: backbone + GAP + MLP sobre crops (roi / "

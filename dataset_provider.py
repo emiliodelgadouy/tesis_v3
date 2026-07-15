@@ -14,6 +14,7 @@ from src.modes import is_mil_mode, is_patch_mode, normalize_mode, resolve_mode_k
 SplitName = Literal["train", "val", "test"]
 PatchSampling = Literal["uniform", "normal"]
 PatchCropStrategy = Literal["uniform", "roi", "normal", "avoid_roi"]
+BagCanvasMode = Literal["resize", "pad"]
 
 DEFAULT_PATCH_CROP_BY_LABEL: dict[float, PatchCropStrategy] = {
     0.0: "avoid_roi",
@@ -83,7 +84,8 @@ def decode_image(path: tf.Tensor) -> tf.Tensor:
         _jpeg,
         lambda: tf.cond(is_png, _png, lambda: _decode_fallback(raw)),
     )
-    img = tf.image.convert_image_dtype(img, tf.float16) * tf.cast(255.0, tf.float16)
+    # Los decoders devuelven uint8; float16 representa exactamente todos los valores 0..255.
+    img = tf.cast(img, tf.float16)
     return img
 
 
@@ -229,6 +231,22 @@ def _roi_norms_from_row(
     )
     if flip:
         xmin, xmax = _flip_roi_norm_x_np(xmin, xmax)
+    if config.patch_align_to_bag_grid and config.bag_canvas_mode == "pad":
+        img_h, img_w = _read_image_hw(str(row[config.path_column]))
+        rows, cols = config.bag_grid
+        ph, pw = _normalize_size(config.image_size)
+        canvas_h, canvas_w = rows * ph, cols * pw
+        if img_h > canvas_h or img_w > canvas_w:
+            raise ValueError(
+                f"La imagen {img_h}x{img_w} excede el canvas MIL "
+                f"{canvas_h}x{canvas_w}; aumenta BAG_GRID o usa bag_canvas_mode='resize'."
+            )
+        pad_top = (canvas_h - img_h) // 2
+        pad_left = (canvas_w - img_w) // 2
+        xmin = (xmin * img_w + pad_left) / canvas_w
+        xmax = (xmax * img_w + pad_left) / canvas_w
+        ymin = (ymin * img_h + pad_top) / canvas_h
+        ymax = (ymax * img_h + pad_top) / canvas_h
     return xmin, ymin, xmax, ymax
 
 
@@ -882,6 +900,7 @@ class TfDatasetConfig:
     )
     patch_roi_sigma_frac: float = 0.1
     patch_avoid_roi_max_attempts: int = 64
+    patch_align_to_bag_grid: bool = False
     return_crop_offset: bool = False
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
@@ -890,12 +909,15 @@ class TfDatasetConfig:
     mode: str = "simple"
     bag_grid: tuple[int, int] = (3, 3)
     bag_keras_tiling: bool = False
+    bag_canvas_mode: BagCanvasMode = "resize"
 
     def needs_roi_columns(self) -> bool:
         if is_mil_mode(self.mode):
             return False
         if not self.patch_mode:
             return False
+        if self.patch_align_to_bag_grid:
+            return True
         if self.patch_crop_strategy in ("roi", "avoid_roi"):
             return True
         by_label = self.patch_crop_by_label or DEFAULT_PATCH_CROP_BY_LABEL
@@ -934,6 +956,7 @@ class DatasetProviderConfig:
     )
     patch_roi_sigma_frac: float = 0.1
     patch_avoid_roi_max_attempts: int = 64
+    patch_align_to_bag_grid: bool = False
     return_crop_offset: bool = False
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
@@ -941,11 +964,14 @@ class DatasetProviderConfig:
     mode: str = "simple"
     bag_grid: tuple[int, int] = (3, 3)
     bag_keras_tiling: bool = False
+    bag_canvas_mode: BagCanvasMode = "resize"
 
     def __post_init__(self) -> None:
         self.image_size = _normalize_size(self.image_size)
         self.bag_grid = (int(self.bag_grid[0]), int(self.bag_grid[1]))
         self.mode = normalize_mode(self.mode)
+        if self.bag_canvas_mode not in ("resize", "pad"):
+            raise ValueError("bag_canvas_mode debe ser 'resize' o 'pad'")
         if is_patch_mode(self.mode):
             self.patch_mode = True
 
@@ -976,6 +1002,7 @@ class DatasetProviderConfig:
             patch_roi_norm_columns=self.patch_roi_norm_columns,
             patch_roi_sigma_frac=self.patch_roi_sigma_frac,
             patch_avoid_roi_max_attempts=self.patch_avoid_roi_max_attempts,
+            patch_align_to_bag_grid=self.patch_align_to_bag_grid,
             return_crop_offset=self.return_crop_offset,
             positive_mixup=self.positive_mixup,
             positive_mixup_alpha=self.positive_mixup_alpha,
@@ -983,6 +1010,7 @@ class DatasetProviderConfig:
             mode=self.mode,
             bag_grid=self.bag_grid,
             bag_keras_tiling=self.bag_keras_tiling,
+            bag_canvas_mode=self.bag_canvas_mode,
         )
 
 
@@ -1183,6 +1211,7 @@ class InspectDataset:
             "bag_mode": is_mil_mode(self.config.mode),
             "mode": self.config.mode,
             "bag_grid": self.config.bag_grid if is_mil_mode(self.config.mode) else None,
+            "bag_canvas_mode": self.config.bag_canvas_mode if is_mil_mode(self.config.mode) else None,
             "image_size": self.config.image_size,
         }
 
@@ -1204,17 +1233,21 @@ class InspectDataset:
             rows, cols = self.config.bag_grid
             if self.config.bag_keras_tiling:
                 print(
-                    f"  modo bag (MIL, tiling Keras): imagen completa {rows * self.config.image_size[0]}"
+                    f"  modo bag (MIL, canvas={self.config.bag_canvas_mode}, tiling Keras): "
+                    f"imagen completa {rows * self.config.image_size[0]}"
                     f"x{cols * self.config.image_size[1]} -> BagTiling en modelo -> "
                     f"{rows * cols} tiles de {self.config.image_size}"
                 )
             else:
                 print(
-                    f"  modo bag (MIL): grilla {rows}x{cols} = {rows * cols} instancias "
+                    f"  modo bag (MIL, canvas={self.config.bag_canvas_mode}): "
+                    f"grilla {rows}x{cols} = {rows * cols} instancias "
                     f"de {self.config.image_size} por imagen"
                 )
         if self.config.patch_mode:
-            if self.config.patch_crop_strategy is not None:
+            if self.config.patch_align_to_bag_grid:
+                crop_desc = f"tile exacto de grilla MIL {self.config.bag_grid}"
+            elif self.config.patch_crop_strategy is not None:
                 crop_desc = f"crop={self.config.patch_crop_strategy}"
             else:
                 by_label = self.config.patch_crop_by_label or DEFAULT_PATCH_CROP_BY_LABEL
@@ -1395,6 +1428,8 @@ class DatasetProvider:
         lateralize_flip_side: Literal["L", "R"] = "R",
     ):
         self.config = config
+        if self.config.bag_canvas_mode not in ("resize", "pad"):
+            raise ValueError("bag_canvas_mode debe ser 'resize' o 'pad'")
         self.lateralize_flip_side = lateralize_flip_side
         self._height, self._width = _normalize_size(config.image_size)
 
@@ -1579,6 +1614,139 @@ class DatasetProvider:
             ),
         )
 
+    def _bag_aligned_tile_offsets(
+        self,
+        path: tf.Tensor,
+        label: tf.Tensor,
+        roi_xmin: tf.Tensor,
+        roi_ymin: tf.Tensor,
+        roi_xmax: tf.Tensor,
+        roi_ymax: tf.Tensor,
+        *,
+        random_patch: bool,
+    ) -> tuple[tf.Tensor, tf.Tensor]:
+        """Elige un tile exacto de la grilla MIL, usando ROI solo como supervision."""
+        rows, cols = self.config.bag_grid
+        ph, pw = self._height, self._width
+        n_tiles = rows * cols
+        tile_indices = tf.range(n_tiles, dtype=tf.int32)
+        tile_rows = tile_indices // cols
+        tile_cols = tile_indices % cols
+
+        tile_ymin = tf.cast(tile_rows * ph, tf.float32)
+        tile_xmin = tf.cast(tile_cols * pw, tf.float32)
+        tile_ymax = tile_ymin + tf.cast(ph, tf.float32)
+        tile_xmax = tile_xmin + tf.cast(pw, tf.float32)
+        canvas_h = tf.cast(rows * ph, tf.float32)
+        canvas_w = tf.cast(cols * pw, tf.float32)
+        xmin = tf.clip_by_value(roi_xmin * canvas_w, 0.0, canvas_w)
+        ymin = tf.clip_by_value(roi_ymin * canvas_h, 0.0, canvas_h)
+        xmax = tf.clip_by_value(roi_xmax * canvas_w, 0.0, canvas_w)
+        ymax = tf.clip_by_value(roi_ymax * canvas_h, 0.0, canvas_h)
+        overlap_w = tf.maximum(0.0, tf.minimum(tile_xmax, xmax) - tf.maximum(tile_xmin, xmin))
+        overlap_h = tf.maximum(0.0, tf.minimum(tile_ymax, ymax) - tf.maximum(tile_ymin, ymin))
+        overlap = overlap_w * overlap_h
+        roi_valid = _roi_is_valid(roi_xmin, roi_ymin, roi_xmax, roi_ymax)
+
+        def _sample_index(candidates: tf.Tensor) -> tf.Tensor:
+            count = tf.shape(candidates)[0]
+
+            def _random() -> tf.Tensor:
+                position = tf.random.uniform([], maxval=count, dtype=tf.int32)
+                return candidates[position]
+
+            def _deterministic() -> tf.Tensor:
+                bucket = tf.cast(
+                    tf.strings.to_hash_bucket_fast(path, 2**31 - 1), tf.int32
+                )
+                return candidates[bucket % count]
+
+            return _random() if random_patch else _deterministic()
+
+        def _positive_index() -> tf.Tensor:
+            return tf.cond(
+                roi_valid,
+                lambda: tf.argmax(overlap, output_type=tf.int32),
+                lambda: _sample_index(tile_indices),
+            )
+
+        def _negative_index() -> tf.Tensor:
+            non_roi_tiles = tf.boolean_mask(tile_indices, overlap <= 0.0)
+            candidates = tf.cond(
+                tf.logical_and(roi_valid, tf.size(non_roi_tiles) > 0),
+                lambda: non_roi_tiles,
+                lambda: tile_indices,
+            )
+            return _sample_index(candidates)
+
+        tile_index = tf.cond(label >= 0.5, _positive_index, _negative_index)
+        return (tile_index // cols) * ph, (tile_index % cols) * pw
+
+    def _bag_canvas(self, img: tf.Tensor) -> tf.Tensor:
+        rows, cols = self.config.bag_grid
+        ph, pw = self._height, self._width
+        canvas_h, canvas_w = rows * ph, cols * pw
+        if self.config.bag_canvas_mode == "pad":
+            h = tf.shape(img)[0]
+            w = tf.shape(img)[1]
+            checks = [
+                tf.debugging.assert_less_equal(
+                    h,
+                    canvas_h,
+                    message="La altura excede el canvas MIL; aumenta bag_grid.",
+                ),
+                tf.debugging.assert_less_equal(
+                    w,
+                    canvas_w,
+                    message="El ancho excede el canvas MIL; aumenta bag_grid.",
+                ),
+            ]
+            with tf.control_dependencies(checks):
+                pad_top = (canvas_h - h) // 2
+                pad_left = (canvas_w - w) // 2
+                full = tf.image.pad_to_bounding_box(
+                    img,
+                    pad_top,
+                    pad_left,
+                    canvas_h,
+                    canvas_w,
+                )
+        else:
+            full = _resize_preserving_dtype(img, [canvas_h, canvas_w])
+        if self.config.use_clahe:
+            full = apply_clahe_tf(
+                full,
+                self.config.clahe_clip_limit,
+                self.config.clahe_tile_grid,
+            )
+        full.set_shape([canvas_h, canvas_w, 3])
+        return full
+
+    def _roi_norms_on_bag_canvas(
+        self,
+        img: tf.Tensor,
+        roi_xmin: tf.Tensor,
+        roi_ymin: tf.Tensor,
+        roi_xmax: tf.Tensor,
+        roi_ymax: tf.Tensor,
+    ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+        if self.config.bag_canvas_mode != "pad":
+            return roi_xmin, roi_ymin, roi_xmax, roi_ymax
+        rows, cols = self.config.bag_grid
+        ph, pw = self._height, self._width
+        canvas_h = tf.cast(rows * ph, tf.float32)
+        canvas_w = tf.cast(cols * pw, tf.float32)
+        h = tf.cast(tf.shape(img)[0], tf.float32)
+        w = tf.cast(tf.shape(img)[1], tf.float32)
+        pad_top = tf.floor((canvas_h - h) / 2.0)
+        pad_left = tf.floor((canvas_w - w) / 2.0)
+        return (
+            (roi_xmin * w + pad_left) / canvas_w,
+            (roi_ymin * h + pad_top) / canvas_h,
+            (roi_xmax * w + pad_left) / canvas_w,
+            (roi_ymax * h + pad_top) / canvas_h,
+        )
+
     def _extract_patch(
         self,
         img: tf.Tensor,
@@ -1592,14 +1760,34 @@ class DatasetProvider:
         random_patch: bool,
     ) -> tf.Tensor:
         ph, pw = self._height, self._width
-        img = _ensure_min_spatial(img, ph, pw)
+        if self.config.patch_align_to_bag_grid:
+            roi_xmin, roi_ymin, roi_xmax, roi_ymax = self._roi_norms_on_bag_canvas(
+                img,
+                roi_xmin,
+                roi_ymin,
+                roi_xmax,
+                roi_ymax,
+            )
+            img = self._bag_canvas(img)
+        else:
+            img = _ensure_min_spatial(img, ph, pw)
         h = tf.shape(img)[0]
         w = tf.shape(img)[1]
         max_y = tf.maximum(h - ph, 0)
         max_x = tf.maximum(w - pw, 0)
         strategy = self.config.patch_crop_strategy
 
-        if strategy == "roi":
+        if self.config.patch_align_to_bag_grid:
+            y0, x0 = self._bag_aligned_tile_offsets(
+                path,
+                label,
+                roi_xmin,
+                roi_ymin,
+                roi_xmax,
+                roi_ymax,
+                random_patch=random_patch,
+            )
+        elif strategy == "roi":
             y0, x0 = self._extract_patch_roi(
                 img,
                 roi_xmin,
@@ -1688,7 +1876,7 @@ class DatasetProvider:
         return img
 
     def _make_bag(self, img: tf.Tensor) -> tf.Tensor:
-        """Redimensiona y, opcionalmente, trocea en una grilla (rows x cols).
+        """Lleva la imagen al canvas y, opcionalmente, la trocea en una grilla.
 
         Con bag_keras_tiling=False (defecto): devuelve (K, ph, pw, 3) —
         el tiling ocurre aqui en tf.data, la augmentacion se aplica por tile.
@@ -1699,14 +1887,7 @@ class DatasetProvider:
         """
         rows, cols = self.config.bag_grid
         ph, pw = self._height, self._width
-        full = _resize_preserving_dtype(img, [rows * ph, cols * pw])
-        if self.config.use_clahe:
-            full = apply_clahe_tf(
-                full,
-                self.config.clahe_clip_limit,
-                self.config.clahe_tile_grid,
-            )
-        full.set_shape([rows * ph, cols * pw, 3])
+        full = self._bag_canvas(img)
         if self.config.bag_keras_tiling:
             return full
         tiles = tf.reshape(full, [rows, ph, cols, pw, 3])
@@ -1786,7 +1967,9 @@ class DatasetProvider:
                     tf.cast(tf.shape(img)[0], tf.float32),
                     tf.cast(tf.shape(img)[1], tf.float32),
                 )
-        if self.config.use_clahe:
+        if self.config.use_clahe and not (
+            self.config.patch_mode and self.config.patch_align_to_bag_grid
+        ):
             img = apply_clahe_tf(
                 img,
                 self.config.clahe_clip_limit,

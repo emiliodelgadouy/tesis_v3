@@ -125,16 +125,17 @@ def start_training_experiment(
 
 
 def _log_model_param_counts(experiment, model) -> None:
-    """Loguea la cantidad de parametros del modelo (totales, entrenables y no entrenables)."""
+    """Loguea log10 de la cantidad de parametros (Comet desborda con los conteos planos)."""
     trainable = int(sum(np.prod(w.shape) for w in model.trainable_weights))
     non_trainable = int(sum(np.prod(w.shape) for w in model.non_trainable_weights))
     total = trainable + non_trainable
-    experiment.log_metric("model_total_params", total)
-    experiment.log_metric("model_trainable_params", trainable)
-    experiment.log_metric("model_non_trainable_params", non_trainable)
-    # log10 de los parametros totales: util para comparar modelos en escala logaritmica.
+    # Solo log10: los conteos absolutos distorsionan/desbordan los charts de Comet.
     if total > 0:
         experiment.log_metric("model_total_params_log10", float(np.log10(total)))
+    if trainable > 0:
+        experiment.log_metric("model_trainable_params_log10", float(np.log10(trainable)))
+    if non_trainable > 0:
+        experiment.log_metric("model_non_trainable_params_log10", float(np.log10(non_trainable)))
 
 
 def _plot_confusion_matrix(y_true, y_pred, *, title: str):
@@ -518,8 +519,9 @@ def _log_split_eval(
     pr_auc = float(average_precision_score(y_true, y_prob))
 
     # Curvas nativas de Comet: interactivas y comparables entre experimentos.
-    experiment.log_curve(f"{key}_roc", x=fpr.tolist(), y=tpr.tolist())
-    experiment.log_curve(f"{key}_pr", x=rec.tolist(), y=prec.tolist())
+    # step=0 fijo: en el panel Logged Curve, un mismo step permite superponer todos los runs.
+    experiment.log_curve(f"{key}_roc", x=fpr.tolist(), y=tpr.tolist(), step=0)
+    experiment.log_curve(f"{key}_pr", x=rec.tolist(), y=prec.tolist(), step=0)
 
     fig_roc_pr, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(11, 4))
     ax_roc.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")

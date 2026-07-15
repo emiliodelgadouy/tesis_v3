@@ -85,18 +85,62 @@ class MilModelBuilderBase(BaseModelBuilder):
         self.model = self.wrap_model(inputs, outputs)
         return self.compile()
 
-    def _transfer_pretrained_instance_dense(self) -> None:
-        # backbone ya compartido via pretrained_builder; copiamos la cabeza densa patch → MIL
+    def _transfer_pretrained_patch_layers(self) -> None:
+        # El backbone ya se comparte; copiamos proyeccion y clasificador de instancia.
         source = self.pretrained_builder
-        if source is None or source.model is None or self.model is None:
+        if source is None:
             return
+        if source.model is None or self.model is None:
+            raise RuntimeError("No se puede transferir el encoder patch: modelo fuente/destino ausente")
         try:
             dense_weights = source.model.get_layer("dense").get_weights()
-        except ValueError:
-            return
-        self.model.get_layer("td_instance_dense").layer.set_weights(dense_weights)
+            output_weights = source.model.get_layer("output").get_weights()
+            target_dense = self.model.get_layer("td_instance_dense").layer
+            target_output = self.model.get_layer("output")
+        except ValueError as exc:
+            raise RuntimeError("No se encontraron la proyeccion/clasificador del modelo patch") from exc
+        target_dense.set_weights(dense_weights)
+        target_output.set_weights(output_weights)
+        target_dense.trainable = False
+        target_output.trainable = False
+        print("Modelo patch transferido: backbone + dense + output congelados para etapa 1")
+
+    def _unfreeze_transferred_patch_layers(self) -> None:
+        if self.pretrained_builder is not None and self.model is not None:
+            self.model.get_layer("td_instance_dense").layer.trainable = True
+            self.model.get_layer("output").trainable = True
+
+    def make_backbone_partially_trainable(
+        self,
+        trainable_fraction=0.30,
+        learning_rate=None,
+        train_batch_norm=False,
+    ):
+        self._unfreeze_transferred_patch_layers()
+        return super().make_backbone_partially_trainable(
+            trainable_fraction=trainable_fraction,
+            learning_rate=learning_rate,
+            train_batch_norm=train_batch_norm,
+        )
+
+    def make_backbone_trainable(
+        self,
+        trainable=True,
+        learning_rate=None,
+        train_batch_norm=False,
+    ):
+        if trainable:
+            self._unfreeze_transferred_patch_layers()
+        return super().make_backbone_trainable(
+            trainable=trainable,
+            learning_rate=learning_rate,
+            train_batch_norm=train_batch_norm,
+        )
 
     def build(self):
         result = self.build_keras_tiling() if self.bag_keras_tiling else self.build_td_tiling()
-        self._transfer_pretrained_instance_dense()
+        self._transfer_pretrained_patch_layers()
+        if self.pretrained_builder is not None:
+            # Keras captura trainable_weights al compilar; recompilar aplica el freeze.
+            result = self.compile()
         return result

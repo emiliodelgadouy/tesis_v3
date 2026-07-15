@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import gc
+import json
 import time
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -55,6 +57,8 @@ __all__ = [
     "release_gpu_memory",
     "resample_train_for_patch",
     "resolve_steps_per_execution",
+    "load_dataset_splits",
+    "save_dataset_splits",
     "stratified_split",
     "threshold_best_f1",
     "threshold_max_recall",
@@ -177,6 +181,223 @@ def stratified_split(
     tbl_train = tbl_training_full.iloc[train_idx].reset_index(drop=True)
     tbl_val = tbl_training_full.iloc[val_idx].reset_index(drop=True)
     return tbl_train, tbl_val, tbl_test
+
+
+def _normalize_split_id_columns(
+    df: pd.DataFrame,
+    *,
+    patient_id_column: str,
+    image_id_column: str,
+) -> pd.DataFrame:
+    missing = [c for c in (patient_id_column, image_id_column) if c not in df.columns]
+    if missing:
+        raise KeyError(f"Faltan columnas de id para splits: {missing}")
+    out = df[[patient_id_column, image_id_column]].copy()
+    out[patient_id_column] = out[patient_id_column].astype(str)
+    out[image_id_column] = out[image_id_column].astype(str)
+    return out
+
+
+def _ids_records(
+    df: pd.DataFrame,
+    *,
+    patient_id_column: str,
+    image_id_column: str,
+) -> list[dict[str, str]]:
+    ids = _normalize_split_id_columns(
+        df, patient_id_column=patient_id_column, image_id_column=image_id_column
+    )
+    return ids.rename(
+        columns={patient_id_column: "patient_id", image_id_column: "image_id"}
+    ).to_dict(orient="records")
+
+
+def _frame_from_split_ids(
+    ds: pd.DataFrame,
+    records: list[dict[str, Any]] | pd.DataFrame,
+    *,
+    split_name: str,
+    patient_id_column: str,
+    image_id_column: str,
+) -> pd.DataFrame:
+    """Reconstruye un split preservando el orden exacto del archivo de IDs."""
+    if isinstance(records, pd.DataFrame):
+        id_df = records[[patient_id_column, image_id_column]].copy()
+    else:
+        id_df = pd.DataFrame(records)
+        if id_df.empty:
+            id_df = pd.DataFrame(columns=["patient_id", "image_id"])
+        id_df = id_df.rename(
+            columns={"patient_id": patient_id_column, "image_id": image_id_column}
+        )
+        id_df = id_df[[patient_id_column, image_id_column]]
+
+    id_df[patient_id_column] = id_df[patient_id_column].astype(str)
+    id_df[image_id_column] = id_df[image_id_column].astype(str)
+    id_df = id_df.reset_index(drop=True)
+    id_df["_split_order"] = np.arange(len(id_df), dtype=np.int64)
+
+    ds_keys = ds.copy()
+    ds_keys[patient_id_column] = ds_keys[patient_id_column].astype(str)
+    ds_keys[image_id_column] = ds_keys[image_id_column].astype(str)
+
+    merged = id_df.merge(
+        ds_keys,
+        on=[patient_id_column, image_id_column],
+        how="left",
+        indicator=True,
+    )
+    missing = int((merged["_merge"] != "both").sum())
+    if missing:
+        raise ValueError(
+            f"Split {split_name!r}: {missing}/{len(id_df)} ids no estan en el dataset actual. "
+            "Regenera el archivo de splits o revisa POSITIVE_MODE / reduce."
+        )
+    return (
+        merged.sort_values("_split_order", kind="mergesort")
+        .drop(columns=["_merge", "_split_order"])
+        .reset_index(drop=True)
+    )
+
+
+def save_dataset_splits(
+    path: str | Path,
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    test: pd.DataFrame,
+    *,
+    patient_id_column: str = "patient_id",
+    image_id_column: str = "image_id",
+    metadata: dict[str, Any] | None = None,
+) -> Path:
+    """Persiste los ids de train/val/test (orden incluido) en JSON o CSV.
+
+    Guardar el train *despues* del undersample fija tambien el conjunto que ve
+    cada epoca de entrenamiento. El formato se elige por extension:
+    ``.json`` (default recomendado) o ``.csv``.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    meta = {
+        "n_train": int(len(train)),
+        "n_val": int(len(val)),
+        "n_test": int(len(test)),
+        **(metadata or {}),
+    }
+
+    if suffix == ".json":
+        payload = {
+            "meta": meta,
+            "train": _ids_records(
+                train, patient_id_column=patient_id_column, image_id_column=image_id_column
+            ),
+            "val": _ids_records(
+                val, patient_id_column=patient_id_column, image_id_column=image_id_column
+            ),
+            "test": _ids_records(
+                test, patient_id_column=patient_id_column, image_id_column=image_id_column
+            ),
+        }
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    elif suffix == ".csv":
+        frames = []
+        for split_name, df in (("train", train), ("val", val), ("test", test)):
+            ids = _normalize_split_id_columns(
+                df, patient_id_column=patient_id_column, image_id_column=image_id_column
+            )
+            ids = ids.rename(
+                columns={patient_id_column: "patient_id", image_id_column: "image_id"}
+            )
+            ids.insert(0, "split", split_name)
+            ids.insert(1, "order", np.arange(len(ids), dtype=np.int64))
+            frames.append(ids)
+        pd.concat(frames, ignore_index=True).to_csv(path, index=False)
+        meta_path = path.with_suffix(path.suffix + ".meta.json")
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    else:
+        raise ValueError(f"Formato de splits no soportado: {suffix!r} (usa .json o .csv)")
+
+    print(
+        f"Splits guardados en {path} "
+        f"(train={meta['n_train']}, val={meta['n_val']}, test={meta['n_test']})"
+    )
+    return path
+
+
+def load_dataset_splits(
+    path: str | Path,
+    ds: pd.DataFrame,
+    *,
+    patient_id_column: str = "patient_id",
+    image_id_column: str = "image_id",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Carga train/val/test desde un JSON/CSV de ids, en el mismo orden guardado."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"No existe el archivo de splits: {path}")
+
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        train = _frame_from_split_ids(
+            ds,
+            payload["train"],
+            split_name="train",
+            patient_id_column=patient_id_column,
+            image_id_column=image_id_column,
+        )
+        val = _frame_from_split_ids(
+            ds,
+            payload["val"],
+            split_name="val",
+            patient_id_column=patient_id_column,
+            image_id_column=image_id_column,
+        )
+        test = _frame_from_split_ids(
+            ds,
+            payload["test"],
+            split_name="test",
+            patient_id_column=patient_id_column,
+            image_id_column=image_id_column,
+        )
+        meta = payload.get("meta") or {}
+    elif suffix == ".csv":
+        raw = pd.read_csv(path, dtype={"patient_id": str, "image_id": str, "split": str})
+        if "order" in raw.columns:
+            raw = raw.sort_values(["split", "order"], kind="mergesort")
+        train = _frame_from_split_ids(
+            ds,
+            raw.loc[raw["split"] == "train", ["patient_id", "image_id"]],
+            split_name="train",
+            patient_id_column=patient_id_column,
+            image_id_column=image_id_column,
+        )
+        val = _frame_from_split_ids(
+            ds,
+            raw.loc[raw["split"] == "val", ["patient_id", "image_id"]],
+            split_name="val",
+            patient_id_column=patient_id_column,
+            image_id_column=image_id_column,
+        )
+        test = _frame_from_split_ids(
+            ds,
+            raw.loc[raw["split"] == "test", ["patient_id", "image_id"]],
+            split_name="test",
+            patient_id_column=patient_id_column,
+            image_id_column=image_id_column,
+        )
+        meta = {"n_train": len(train), "n_val": len(val), "n_test": len(test)}
+    else:
+        raise ValueError(f"Formato de splits no soportado: {suffix!r} (usa .json o .csv)")
+
+    print(
+        f"Splits cargados desde {path} "
+        f"(train={len(train)}, val={len(val)}, test={len(test)}"
+        + (f", meta_keys={sorted(meta.keys())}" if meta else "")
+        + ")"
+    )
+    return train, val, test
 
 
 def logit_initial_bias(n_positive: int, n_negative: int) -> float:
