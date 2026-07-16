@@ -182,28 +182,34 @@ def _sample_dataframe(
 
 
 def build_dataset(
-    config: DatasetConfig | None = None,
-    reduced: bool = False,
+    config: dict | None = None,
+    *,
+    dataset_config: DatasetConfig | None = None,
+    reduced: bool | None = None,
     sample_fraction: float = 0.10,
     sample_seed: int | None = 42,
 ) -> dict[str, object]:
-    config = config or DatasetConfig()
-    ds_raw = load_raw_dataframe(config)
-    missing_columns = [column for column in config.filter_columns if column not in ds_raw.columns]
+    """Descarga/arma el dataset. ``reduced`` sale de ``config["GENERAL"]["REDUCED_DATASET"]``
+    salvo que se pase explicito; ``dataset_config`` es la config de I/O (GCS/paths)."""
+    if reduced is None:
+        reduced = bool(config["GENERAL"]["REDUCED_DATASET"]) if config is not None else False
+    dataset_config = dataset_config or DatasetConfig()
+    ds_raw = load_raw_dataframe(dataset_config)
+    missing_columns = [column for column in dataset_config.filter_columns if column not in ds_raw.columns]
     if missing_columns:
         raise KeyError(f"Faltan columnas para el filtrado: {missing_columns}")
 
-    ds_raw = add_cls_column(ds_raw, config)
-    ds = ds_raw[ds_raw[list(config.filter_columns)].eq(1).any(axis=1)].copy()
+    ds_raw = add_cls_column(ds_raw, dataset_config)
+    ds = ds_raw[ds_raw[list(dataset_config.filter_columns)].eq(1).any(axis=1)].copy()
     if reduced:
         ds = _sample_dataframe(ds, sample_fraction, sample_seed)
 
     return {
-        "root": config.root_dir,
-        "data_dir": config.data_dir,
-        "raw_img_dir": config.raw_img_dir,
-        "raw_csv_dir": config.raw_csv_dir,
-        "csv_main": config.csv_main,
+        "root": dataset_config.root_dir,
+        "data_dir": dataset_config.data_dir,
+        "raw_img_dir": dataset_config.raw_img_dir,
+        "raw_csv_dir": dataset_config.raw_csv_dir,
+        "csv_main": dataset_config.csv_main,
         "ds_raw": ds_raw,
         "ds": ds,
         "reduced": reduced,

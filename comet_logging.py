@@ -31,9 +31,12 @@ COMET_N_SAMPLE_IMAGES = 8
 COMET_MAX_IMAGE_NAME_LEN = 100
 
 
-def login(*, api_key: str | None = None) -> None:
-    """Autentica en Comet. Si api_key es vacío, usa env o ~/.comet.config."""
-    key = COMET_API_KEY if api_key is None else api_key
+def login(config) -> None:
+    """Autentica en Comet con ``config["COMET"]["API_KEY"]``.
+
+    Si la key esta vacia, cae al env ``COMET_API_KEY`` o a ``~/.comet.config``.
+    """
+    key = config["COMET"].get("API_KEY") or COMET_API_KEY
     if key:
         comet_ml.login(api_key=key)
     else:
@@ -100,12 +103,13 @@ def log_training_timing_summary(experiment, training_timer) -> None:
 
 
 def start_training_experiment(
+    config: dict[str, Any],
     *,
     experiment_name: str,
     run_config: dict[str, Any],
     model=None,
-    project_name: str = COMET_PROJECT,
 ):
+    project_name = config["COMET"]["PROJECT_NAME"]
     experiment = comet_ml.start(
         project_name=project_name,
         experiment_config=comet_ml.ExperimentConfig(
@@ -387,15 +391,16 @@ def _sample_metadata(
 
 
 def log_deterministic_input_samples(
+    config: dict[str, Any],
     experiment,
     dataset,
     *,
     experiment_name: str | None = None,
-    random_seed: int,
-    n_samples: int = COMET_N_SAMPLE_IMAGES,
     split_name: str = "train",
 ) -> None:
     """Loguea a Comet imagenes individuales post-resize / pre-augmentacion."""
+    random_seed = config["GENERAL"]["RANDOM_SEED"]
+    n_samples = config["COMET"]["N_SAMPLE_IMAGES"]
     if n_samples <= 0:
         return
 
@@ -560,19 +565,17 @@ def _log_split_eval(
 
 
 def log_test_results(
+    config: dict[str, Any],
     experiment,
     *,
     backbone_name: str,
-    dataset,
     y_test_true,
     y_test_prob,
     y_pred_default,
     y_pred_youden,
     thr_youden: float,
     thr_recall90: float,
-    prob_threshold: float,
     best_val_metric: float,
-    random_seed: int,
     y_val_true=None,
     y_val_prob=None,
     y_val_pred_default=None,
@@ -581,7 +584,6 @@ def log_test_results(
     y_train_prob=None,
     y_train_pred_default=None,
     y_train_pred_youden=None,
-    n_sample_images: int = COMET_N_SAMPLE_IMAGES,
     final_weights_path=None,
     show_plots: bool = True,
 ) -> str:
@@ -594,6 +596,7 @@ def log_test_results(
     {split}_pos). Train y val son opcionales: solo se loguean si se pasan sus
     predicciones/probabilidades.
     """
+    prob_threshold = config["GENERAL"]["PROBABILITY_THRESHOLD"]
     splits = [
         (
             "Train",

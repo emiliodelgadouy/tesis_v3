@@ -6,16 +6,11 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.metrics import (
-    ConfusionMatrixDisplay,
-    average_precision_score,
-    confusion_matrix,
     precision_recall_curve,
-    roc_auc_score,
     roc_curve,
 )
 from sklearn.model_selection import StratifiedGroupKFold
@@ -44,15 +39,10 @@ __all__ = [
     "run_training_stage",
     "apply_clahe_tf",
     "apply_probability_threshold",
-    "binary_report",
     "decode_image",
     "deduplicate_images",
     "dispose_model_builder",
-    "labels_from_tf_dataset",
     "logit_initial_bias",
-    "plot_binary_confusion_matrix",
-    "predict_probabilities",
-    "predict_probabilities_tta",
     "predict_probs_and_labels",
     "release_gpu_memory",
     "resample_train_for_patch",
@@ -61,7 +51,6 @@ __all__ = [
     "save_dataset_splits",
     "stratified_split",
     "threshold_best_f1",
-    "threshold_max_recall",
     "threshold_recall_target",
     "threshold_youden_j",
     "undersample_negatives",
@@ -156,15 +145,17 @@ def deduplicate_images(
 
 
 def stratified_split(
+    config,
     ds,
-    val_split=0.20,
-    seed=42,
+    *,
     split_column="split",
     train_split_value="training",
     test_split_value="test",
     label_column="cls",
     group_column="patient_id",
 ):
+    val_split = config["GENERAL"]["VALIDATION_SPLIT_RATIO"]
+    seed = config["GENERAL"]["RANDOM_SEED"]
     tbl_training_full = ds[ds[split_column] == train_split_value].reset_index(drop=True)
     tbl_test = ds[ds[split_column] == test_split_value].reset_index(drop=True)
 
@@ -261,7 +252,7 @@ def _frame_from_split_ids(
 
 
 def save_dataset_splits(
-    path: str | Path,
+    config,
     train: pd.DataFrame,
     val: pd.DataFrame,
     test: pd.DataFrame,
@@ -272,17 +263,25 @@ def save_dataset_splits(
 ) -> Path:
     """Persiste los ids de train/val/test (orden incluido) en JSON o CSV.
 
-    Guardar el train *despues* del undersample fija tambien el conjunto que ve
-    cada epoca de entrenamiento. El formato se elige por extension:
-    ``.json`` (default recomendado) o ``.csv``.
+    La ruta y la metadata (seed, positive_mode, ratios, ...) salen de
+    ``config["GENERAL"]``. ``metadata`` extra se mergea encima. Guardar el train
+    *despues* del undersample fija tambien el conjunto que ve cada epoca de
+    entrenamiento. El formato se elige por extension: ``.json`` o ``.csv``.
     """
-    path = Path(path)
+    general = config["GENERAL"]
+    path = Path(general["SPLIT_IDS_PATH"])
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower()
     meta = {
         "n_train": int(len(train)),
         "n_val": int(len(val)),
         "n_test": int(len(test)),
+        "random_seed": general["RANDOM_SEED"],
+        "positive_mode": general["POSITIVE_MODE"],
+        "validation_split_ratio": general["VALIDATION_SPLIT_RATIO"],
+        "no_finding_to_finding_ratio": general["NO_FINDING_TO_FINDING_RATIO"],
+        "reduced_dataset": general["REDUCED_DATASET"],
+        "includes_undersampled_train": True,
         **(metadata or {}),
     }
 
@@ -326,7 +325,7 @@ def save_dataset_splits(
 
 
 def load_dataset_splits(
-    path: str | Path,
+    config,
     ds: pd.DataFrame,
     *,
     patient_id_column: str = "patient_id",
@@ -336,11 +335,12 @@ def load_dataset_splits(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Carga train/val/test desde un JSON/CSV de ids, en el mismo orden guardado.
 
-    La validacion de IDs corre contra ``ds`` completo; luego, si
-    ``require_existing_files`` es True, se descartan las filas cuya imagen no
-    exista en disco (evita que tf.data falle con NotFoundError al leerlas).
+    La ruta sale de ``config["GENERAL"]["SPLIT_IDS_PATH"]``. La validacion de IDs
+    corre contra ``ds`` completo; luego, si ``require_existing_files`` es True, se
+    descartan las filas cuya imagen no exista en disco (evita que tf.data falle con
+    NotFoundError al leerlas).
     """
-    path = Path(path)
+    path = Path(config["GENERAL"]["SPLIT_IDS_PATH"])
     if not path.is_file():
         raise FileNotFoundError(f"No existe el archivo de splits: {path}")
 
@@ -439,24 +439,12 @@ def _eval_tf_dataset(dataset):
     return as_tf_dataset(dataset)
 
 
-def labels_from_tf_dataset(dataset) -> np.ndarray:
-    return np.concatenate(
-        [np.asarray(yb, dtype=np.int64).reshape(-1) for _, yb in _eval_tf_dataset(dataset)]
-    )
-
-
-def predict_probabilities(model, dataset, *, verbose: int = 1) -> np.ndarray:
-    logits = model.predict(dataset, verbose=verbose).astype(np.float64).reshape(-1)
-    return _sigmoid(logits)
-
-
 def predict_probs_and_labels(model, dataset, *, use_tta: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """Una sola pasada sobre el dataset: devuelve (y_true, y_prob) alineados.
 
-    Reemplaza el par ``labels_from_tf_dataset`` + ``predict_probabilities``, que
-    recorre el pipeline ``tf.data`` dos veces (decodificando/croppeando las
-    imagenes en cada pasada). Aca se itera una sola vez, tomando labels y logits
-    del mismo batch. Con ``use_tta=True`` promedia la prediccion con su espejo
+    Itera el pipeline ``tf.data`` una sola vez, tomando labels y logits del mismo
+    batch (en vez de recorrerlo dos veces decodificando/croppeando las imagenes en
+    cada pasada). Con ``use_tta=True`` promedia la prediccion con su espejo
     horizontal (segunda pasada solo si TTA esta activo).
     """
     eval_ds = _eval_tf_dataset(dataset)
@@ -488,42 +476,18 @@ def apply_probability_threshold(y_prob, threshold: float) -> np.ndarray:
     return (y_prob >= threshold).astype(np.int64)
 
 
-def plot_binary_confusion_matrix(
-    y_true,
-    y_pred,
-    *,
-    title: str,
-    display_labels: tuple[str, str] = ("Neg", "Pos"),
-    figsize: tuple[float, float] = (5, 4),
-) -> None:
-    fig, ax = plt.subplots(figsize=figsize)
-    ConfusionMatrixDisplay(
-        confusion_matrix(y_true, y_pred, labels=[0, 1]),
-        display_labels=list(display_labels),
-    ).plot(ax=ax, colorbar=False)
-    ax.set_title(title)
-    plt.tight_layout()
-    plt.show()
-
-
-def threshold_max_recall(y_true, y_prob) -> tuple[float, float]:
-    """Umbral que maximiza recall en validación (desempate por precisión)."""
-    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
-    recalls_t, precisions_t = recalls[:-1], precisions[:-1]
-    max_recall = float(recalls_t.max())
-    candidate_idx = np.flatnonzero(recalls_t == max_recall)
-    best_i = int(candidate_idx[np.argmax(precisions_t[candidate_idx])])
-    return float(thresholds[best_i]), max_recall
-
-
 def undersample_negatives(
+    config,
     df: pd.DataFrame,
     *,
-    ratio: int = 3,
-    seed: int = 42,
     label_column: str = "cls",
 ) -> pd.DataFrame:
-    """Submuestrea negativos a `ratio`:1 respecto de los positivos. Solo para train."""
+    """Submuestrea negativos a `ratio`:1 respecto de los positivos. Solo para train.
+
+    ``ratio`` y ``seed`` salen de ``config["GENERAL"]``.
+    """
+    ratio = config["GENERAL"]["NO_FINDING_TO_FINDING_RATIO"]
+    seed = config["GENERAL"]["RANDOM_SEED"]
     pos = df[df[label_column] >= 0.5]
     neg = df[df[label_column] < 0.5]
     n_neg = min(len(neg), len(pos) * ratio)
@@ -574,18 +538,6 @@ def _flip_inputs_tta(x: tf.Tensor) -> tf.Tensor:
     return tf.image.flip_left_right(x)
 
 
-def predict_probabilities_tta(model, dataset) -> np.ndarray:
-    """TTA por flip horizontal: promedia probabilidades de imagen normal + espejada."""
-    base = _eval_tf_dataset(dataset)
-    flipped = base.map(
-        lambda x, y: (_flip_inputs_tta(x), y),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
-    p_base = _sigmoid(model.predict(base, verbose=0).reshape(-1))
-    p_flip = _sigmoid(model.predict(flipped, verbose=0).reshape(-1))
-    return (p_base + p_flip) / 2.0
-
-
 def threshold_youden_j(y_true, y_prob) -> float:
     """Umbral que maximiza el indice J de Youden (sensibilidad + especificidad - 1)."""
     fpr, tpr, thr = roc_curve(y_true, y_prob)
@@ -610,38 +562,6 @@ def threshold_recall_target(y_true, y_prob, target_recall: float = 0.90) -> floa
         return threshold_best_f1(y_true, y_prob)
     best = int(ok[np.argmax(precision_t[ok])])
     return float(thr[best])
-
-
-def binary_report(y_true, y_prob, threshold: float, *, title: str = "") -> dict:
-    """Imprime metricas clinicas (sensibilidad, especificidad, PPV, NPV, F1) a un umbral."""
-    y_true = np.asarray(y_true).astype(int).reshape(-1)
-    y_pred = (np.asarray(y_prob) >= threshold).astype(int)
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-    sensitivity = tp / (tp + fn) if (tp + fn) else 0.0
-    specificity = tn / (tn + fp) if (tn + fp) else 0.0
-    ppv = tp / (tp + fp) if (tp + fp) else 0.0
-    npv = tn / (tn + fn) if (tn + fn) else 0.0
-    f1 = 2 * ppv * sensitivity / (ppv + sensitivity) if (ppv + sensitivity) else 0.0
-    balanced_acc = (sensitivity + specificity) / 2.0
-    print(f"== {title} (umbral={threshold:.4f}) ==")
-    print(f"  ROC-AUC ........ {roc_auc_score(y_true, y_prob):.4f}")
-    print(f"  PR-AUC ......... {average_precision_score(y_true, y_prob):.4f}")
-    print(f"  Sensibilidad ... {sensitivity:.4f}  (recall+)")
-    print(f"  Especificidad .. {specificity:.4f}")
-    print(f"  PPV (prec+) .... {ppv:.4f}")
-    print(f"  NPV ............ {npv:.4f}")
-    print(f"  F1 ............. {f1:.4f}")
-    print(f"  Balanced acc ... {balanced_acc:.4f}")
-    print(f"  Matriz [tn fp / fn tp]: [{tn} {fp} / {fn} {tp}]\n")
-    return {
-        "threshold": threshold,
-        "sensitivity": sensitivity,
-        "specificity": specificity,
-        "ppv": ppv,
-        "npv": npv,
-        "f1": f1,
-        "balanced_accuracy": balanced_acc,
-    }
 
 
 def warmup(model, train_ds) -> float:
@@ -781,21 +701,37 @@ class EpochTimer(keras.callbacks.Callback):
             logs["stage_elapsed_seconds"] = self.training_timer.elapsed_since_stage_start()
 
 
+_STAGE_EPOCH_KEYS = {
+    1: "EPOCHS_FROZEN_BACKBONE",
+    2: "EPOCHS_PARTIAL_BACKBONE",
+    3: "EPOCHS_FULL_FINETUNE",
+}
+
+
 def run_training_stage(
+    config,
     model,
     train_ds,
     val_ds,
     *,
     stage: int,
-    epochs: int,
     training_timer: TrainingTimer,
     epoch_offset: int = 0,
     experiment=None,
     extra_callbacks=None,
     setup_fn=None,
 ):
-    """Ejecuta una etapa de congelamiento con metricas de tiempo reales (wall-clock)."""
+    """Ejecuta una etapa de congelamiento con metricas de tiempo reales (wall-clock).
+
+    Las epocas de cada etapa (1=frozen, 2=partial, 3=full) salen de
+    ``config["TRAINING"]``; el resto (setup de descongelamiento) sigue llegando por
+    ``setup_fn``.
+    """
     from src.comet_logging import CometEpochLogger, log_stage_timing
+
+    if stage not in _STAGE_EPOCH_KEYS:
+        raise ValueError(f"stage invalido: {stage!r} (esperado 1, 2 o 3)")
+    epochs = config["TRAINING"][_STAGE_EPOCH_KEYS[stage]]
 
     if epochs <= 0:
         empty_history = keras.callbacks.History()

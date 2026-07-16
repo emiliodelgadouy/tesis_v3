@@ -32,21 +32,15 @@ from src.comet_logging import (
 )
 from src.dataset import build_dataset
 from src.dataset_provider import as_tf_dataset, build_dataset_provider, hard_negatives_from_positives
-from src.imports import get_device, set_seed
+from src.imports import set_seed
 from src.modes import normalize_mode
 from src.model_builder import ModelBuilder
-from src.plots import plot_history
 from src.utils import (
     TrainingTimer,
     apply_probability_threshold,
-    binary_report,
     deduplicate_images,
     dispose_model_builder,
-    labels_from_tf_dataset,
     logit_initial_bias,
-    plot_binary_confusion_matrix,
-    predict_probabilities,
-    predict_probabilities_tta,
     predict_probs_and_labels,
     release_gpu_memory,
     resample_train_for_patch,
@@ -56,7 +50,6 @@ from src.utils import (
     save_dataset_splits,
     stratified_split,
     threshold_best_f1,
-    threshold_max_recall,
     threshold_recall_target,
     threshold_youden_j,
     undersample_negatives,
@@ -86,24 +79,16 @@ __all__ = [
     "build_dataset_provider",
     "hard_negatives_from_positives",
     # imports
-    "get_device",
     "set_seed",
     "normalize_mode",
     # model_builder
     "ModelBuilder",
-    # plots
-    "plot_history",
     # utils
     "TrainingTimer",
     "apply_probability_threshold",
-    "binary_report",
     "deduplicate_images",
     "dispose_model_builder",
-    "labels_from_tf_dataset",
     "logit_initial_bias",
-    "plot_binary_confusion_matrix",
-    "predict_probabilities",
-    "predict_probabilities_tta",
     "predict_probs_and_labels",
     "release_gpu_memory",
     "resample_train_for_patch",
@@ -113,7 +98,6 @@ __all__ = [
     "save_dataset_splits",
     "stratified_split",
     "threshold_best_f1",
-    "threshold_max_recall",
     "threshold_recall_target",
     "threshold_youden_j",
     "undersample_negatives",

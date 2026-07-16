@@ -15,16 +15,9 @@ from tensorflow.keras.applications import EfficientNetB3, EfficientNetB6
 from tensorflow.keras.applications.efficientnet import preprocess_input
 
 
-def set_seed(seed: int = 42) -> None:
+def set_seed(config) -> None:
+    """Fija las semillas (random/numpy/tf) desde ``config["GENERAL"]["RANDOM_SEED"]``."""
+    seed = config["GENERAL"]["RANDOM_SEED"]
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
-
-
-def get_device() -> str:
-    gpus = tf.config.list_physical_devices("GPU")
-    if not gpus:
-        return "CPU"
-    details = tf.config.experimental.get_device_details(gpus[0])
-    name = (details.get("device_name") or "").strip()
-    return f"GPU: {name}" if name else "GPU"

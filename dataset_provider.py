@@ -1043,7 +1043,7 @@ def _preview_from_dataframe(
     table = df.reset_index(drop=True)
     if table.empty:
         raise ValueError("No hay filas para previsualizar.")
-    preview = build_dataset_provider(config=preview_config).build(
+    preview = build_dataset_provider(provider_config=preview_config).build(
         table,
         shuffle=False,
         random_patch=not preview_deterministic,
@@ -2202,29 +2202,52 @@ class DatasetProvider:
 
 
 def build_dataset_provider(
+    config: dict[str, Any] | None = None,
     image_size: tuple[int, int] | int | None = None,
     batch_size: int | None = None,
     *,
-    config: DatasetProviderConfig | None = None,
+    provider_config: DatasetProviderConfig | None = None,
     **kwargs: Any,
 ) -> DatasetProvider:
-    if config is None:
+    """Crea un DatasetProvider.
+
+    Formas de uso:
+    - ``build_dataset_provider(provider_config=DatasetProviderConfig(...))``: bajo nivel.
+    - ``build_dataset_provider(CONFIG, image_size, batch_size, mode=..., ...)``: toma
+      seed/use_clahe/bag_* del CONFIG del notebook; los kwargs explicitos los pisan.
+    - ``build_dataset_provider(None, image_size, batch_size, seed=..., ...)``: sin CONFIG,
+      todo por kwargs.
+    """
+    if provider_config is None:
         if image_size is None or batch_size is None:
             raise ValueError(
-                "Indica `config=DatasetProviderConfig(...)` o los argumentos "
+                "Indica `provider_config=DatasetProviderConfig(...)` o los argumentos "
                 "image_size y batch_size."
             )
+        if config is not None:
+            general = config["GENERAL"]
+            mil = config["MIL"]
+            defaults = {
+                "seed": general["RANDOM_SEED"],
+                "use_clahe": general["USE_CLAHE"],
+                "bag_grid": mil["BAG_GRID"],
+                "bag_keras_tiling": mil["BAG_KERAS_TILING"],
+                "bag_canvas_mode": mil["BAG_CANVAS_MODE"],
+                "patch_resize_to_bag_canvas": mil["PATCH_RESIZE_TO_BAG_CANVAS"],
+            }
+            # Los kwargs explicitos pisan los defaults del CONFIG.
+            kwargs = {**defaults, **kwargs}
         kwargs = resolve_mode_kwargs(kwargs)
-        config = DatasetProviderConfig(
+        provider_config = DatasetProviderConfig(
             image_size=image_size,
             batch_size=batch_size,
             **kwargs,
         )
-    elif kwargs:
-        raise ValueError("Pasa solo `config` o kwargs sueltos, no ambos.")
+    elif kwargs or config is not None:
+        raise ValueError("Pasa solo `provider_config` o (config + kwargs sueltos), no ambos.")
     return DatasetProvider(
-        config.to_tf_config(),
-        lateralize_flip_side=config.lateralize_flip_side,
+        provider_config.to_tf_config(),
+        lateralize_flip_side=provider_config.lateralize_flip_side,
     )
 
 
@@ -2274,7 +2297,7 @@ def build_tf_dataset(
     elif kwargs or image_size is not None or batch_size is not None:
         raise ValueError("Pasa solo `config` o kwargs sueltos, no ambos.")
 
-    provider = build_dataset_provider(config=config)
+    provider = build_dataset_provider(provider_config=config)
     built = provider.build(df, shuffle=shuffle, name=name)
     if as_batched:
         return built
