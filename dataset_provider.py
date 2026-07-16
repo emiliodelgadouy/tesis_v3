@@ -231,7 +231,7 @@ def _roi_norms_from_row(
     )
     if flip:
         xmin, xmax = _flip_roi_norm_x_np(xmin, xmax)
-    if config.patch_align_to_bag_grid and config.bag_canvas_mode == "pad":
+    if (config.patch_align_to_bag_grid or config.patch_resize_to_bag_canvas) and config.bag_canvas_mode == "pad":
         img_h, img_w = _read_image_hw(str(row[config.path_column]))
         rows, cols = config.bag_grid
         ph, pw = _normalize_size(config.image_size)
@@ -901,6 +901,10 @@ class TfDatasetConfig:
     patch_roi_sigma_frac: float = 0.1
     patch_avoid_roi_max_attempts: int = 64
     patch_align_to_bag_grid: bool = False
+    # Reescala la imagen al canvas del bag (rows*ph x cols*pw) antes de recortar,
+    # para que el parche vea la misma escala que los tiles de ABMIL, pero muestreando
+    # libremente con las estrategias roi/avoid_roi (sin fijar a la grilla).
+    patch_resize_to_bag_canvas: bool = False
     return_crop_offset: bool = False
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
@@ -957,6 +961,7 @@ class DatasetProviderConfig:
     patch_roi_sigma_frac: float = 0.1
     patch_avoid_roi_max_attempts: int = 64
     patch_align_to_bag_grid: bool = False
+    patch_resize_to_bag_canvas: bool = False
     return_crop_offset: bool = False
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
@@ -1003,6 +1008,7 @@ class DatasetProviderConfig:
             patch_roi_sigma_frac=self.patch_roi_sigma_frac,
             patch_avoid_roi_max_attempts=self.patch_avoid_roi_max_attempts,
             patch_align_to_bag_grid=self.patch_align_to_bag_grid,
+            patch_resize_to_bag_canvas=self.patch_resize_to_bag_canvas,
             return_crop_offset=self.return_crop_offset,
             positive_mixup=self.positive_mixup,
             positive_mixup_alpha=self.positive_mixup_alpha,
@@ -1247,6 +1253,8 @@ class InspectDataset:
         if self.config.patch_mode:
             if self.config.patch_align_to_bag_grid:
                 crop_desc = f"tile exacto de grilla MIL {self.config.bag_grid}"
+            elif self.config.patch_resize_to_bag_canvas and self.config.patch_crop_strategy is not None:
+                crop_desc = f"crop={self.config.patch_crop_strategy} sobre canvas {self.config.bag_canvas_mode} {self.config.bag_grid}"
             elif self.config.patch_crop_strategy is not None:
                 crop_desc = f"crop={self.config.patch_crop_strategy}"
             else:
@@ -1760,7 +1768,7 @@ class DatasetProvider:
         random_patch: bool,
     ) -> tf.Tensor:
         ph, pw = self._height, self._width
-        if self.config.patch_align_to_bag_grid:
+        if self.config.patch_align_to_bag_grid or self.config.patch_resize_to_bag_canvas:
             roi_xmin, roi_ymin, roi_xmax, roi_ymax = self._roi_norms_on_bag_canvas(
                 img,
                 roi_xmin,
@@ -1968,7 +1976,8 @@ class DatasetProvider:
                     tf.cast(tf.shape(img)[1], tf.float32),
                 )
         if self.config.use_clahe and not (
-            self.config.patch_mode and self.config.patch_align_to_bag_grid
+            self.config.patch_mode
+            and (self.config.patch_align_to_bag_grid or self.config.patch_resize_to_bag_canvas)
         ):
             img = apply_clahe_tf(
                 img,
