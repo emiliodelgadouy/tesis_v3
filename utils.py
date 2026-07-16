@@ -21,7 +21,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
-from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS
+from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS, filter_existing_files
 from src.dataset_provider import (
     apply_clahe_tf,
     as_tf_dataset,
@@ -331,8 +331,15 @@ def load_dataset_splits(
     *,
     patient_id_column: str = "patient_id",
     image_id_column: str = "image_id",
+    require_existing_files: bool = True,
+    path_column: str = "path",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Carga train/val/test desde un JSON/CSV de ids, en el mismo orden guardado."""
+    """Carga train/val/test desde un JSON/CSV de ids, en el mismo orden guardado.
+
+    La validacion de IDs corre contra ``ds`` completo; luego, si
+    ``require_existing_files`` es True, se descartan las filas cuya imagen no
+    exista en disco (evita que tf.data falle con NotFoundError al leerlas).
+    """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"No existe el archivo de splits: {path}")
@@ -390,6 +397,11 @@ def load_dataset_splits(
         meta = {"n_train": len(train), "n_val": len(val), "n_test": len(test)}
     else:
         raise ValueError(f"Formato de splits no soportado: {suffix!r} (usa .json o .csv)")
+
+    if require_existing_files:
+        train = filter_existing_files(train, path_column)
+        val = filter_existing_files(val, path_column)
+        test = filter_existing_files(test, path_column)
 
     print(
         f"Splits cargados desde {path} "

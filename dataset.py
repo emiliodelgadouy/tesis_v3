@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -150,6 +151,20 @@ def add_cls_column(df: pd.DataFrame, config: DatasetConfig) -> pd.DataFrame:
         df[list(config.cls_positive_columns)].eq(config.cls_positive_value).any(axis=1)
     ).astype("float32")
     return df
+
+
+def filter_existing_files(df: pd.DataFrame, path_column: str = "path") -> pd.DataFrame:
+    """Descarta filas cuya imagen no exista en disco (evita NotFoundError en tf.data)."""
+    if df.empty or path_column not in df.columns:
+        return df
+    exists = df[path_column].map(os.path.exists)
+    missing = int((~exists).sum())
+    if missing:
+        print(
+            f"[dataset] {missing}/{len(df)} filas descartadas: imagen no encontrada en disco "
+            "(CSV con mas entradas que el tar o extraccion incompleta)."
+        )
+    return df[exists].copy()
 
 
 def _sample_dataframe(
