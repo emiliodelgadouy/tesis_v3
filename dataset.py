@@ -181,7 +181,7 @@ def _sample_dataframe(
     return df.sample(frac=fraction, random_state=seed).copy()
 
 
-def build_dataset(
+def download_and_build_dataset(
     config: dict | None = None,
     *,
     dataset_config: DatasetConfig | None = None,

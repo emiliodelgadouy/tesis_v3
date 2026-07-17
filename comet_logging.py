@@ -23,7 +23,7 @@ from tensorflow import keras
 
 from src.dataset_provider import as_tf_dataset
 
-# Defaults; el notebook puede sobreescribir COMET_* y pasarlos a login()/start_training_experiment().
+# Defaults; el notebook puede sobreescribir COMET_* y pasarlos a login_comet()/start_training_experiment().
 COMET_API_KEY = os.environ.get("COMET_API_KEY", "")
 COMET_PROJECT = "tesis-reni"
 COMET_N_SAMPLE_IMAGES = 8
@@ -31,7 +31,7 @@ COMET_N_SAMPLE_IMAGES = 8
 COMET_MAX_IMAGE_NAME_LEN = 100
 
 
-def login(config) -> None:
+def login_comet(config) -> None:
     """Autentica en Comet con ``config["COMET"]["API_KEY"]``.
 
     Si la key esta vacia, cae al env ``COMET_API_KEY`` o a ``~/.comet.config``.

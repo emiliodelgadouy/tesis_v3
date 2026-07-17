@@ -1,12 +1,12 @@
 from src.modes import is_mil_mode, normalize_mode
 from src.model_builder.abmil import AbmilModelBuilder, AbmilPatchHardnegModelBuilder
-from src.model_builder.highres import HighresModelBuilder
+from src.model_builder.full import FullModelBuilder
 from src.model_builder.patch import PatchModelBuilder
 from src.model_builder.simple import SimpleModelBuilder
 
 _BUILDERS = {
     "simple": SimpleModelBuilder,
-    "highres": HighresModelBuilder,
+    "full": FullModelBuilder,
     "abmil": AbmilModelBuilder,
     "abmil_patch_hardneg": AbmilPatchHardnegModelBuilder,
     "patch": PatchModelBuilder,
@@ -23,7 +23,7 @@ def create_model_builder(config, IMG_SIZE, backbone, preprocess_input, *, mode="
     metric_to_maximize = general["METRIC_TO_MAXIMIZE"]
     monitor_mode = "min" if metric_to_maximize == "loss" else "max"
 
-    # elige el builder segun MODE (simple / highres / abmil / patch / patch_hardneg)
+    # elige el builder segun MODE (simple / full / abmil / patch / patch_hardneg)
     mode = normalize_mode(mode)
     common = dict(IMG_SIZE=IMG_SIZE, backbone=backbone, preprocess_input=preprocess_input, backbone_trainable=backbone_trainable, top_dense=top_dense, dropout=dropout, learning_rate=learning_rate, focal_alpha=focal_alpha, focal_gamma=training["FOCAL_GAMMA"], metric_to_maximize=metric_to_maximize, checkpoint_monitor=checkpoint_monitor, monitor_mode=monitor_mode, early_stopping_patience=training["EARLY_STOPPING_PATIENCE"], reduce_lr_patience=training["REDUCE_LR_PATIENCE"], reduce_lr_factor=reduce_lr_factor, min_lr=min_lr, aggressive_augmentation=training["AGGRESSIVE_AUGMENTATION"], initial_bias=initial_bias, pretrained_builder=pretrained_builder, jit_compile=jit_compile, steps_per_execution=steps_per_execution, checkpoint_prefix=checkpoint_prefix, lateralized_inputs=lateralized_inputs)
     if is_mil_mode(mode):

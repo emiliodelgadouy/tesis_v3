@@ -23,7 +23,7 @@ DEFAULT_PATCH_CROP_BY_LABEL: dict[float, PatchCropStrategy] = {
 
 
 def _roll_tf_random_seed() -> int:
-    """Nueva semilla TF por preview estocastico (evita repetir con set_seed global fijo)."""
+    """Nueva semilla TF por preview estocastico (evita repetir con set_random_seeds global fijo)."""
     seed = int.from_bytes(os.urandom(4), "big") % (2**31 - 1)
     tf.random.set_seed(seed)
     return seed

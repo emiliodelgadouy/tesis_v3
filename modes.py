@@ -1,29 +1,29 @@
-"""Modos de entrenamiento: SIMPLE | ABMIL | HIGHRES | PATCH."""
+"""Modos de entrenamiento: SIMPLE | ABMIL | FULL | PATCH."""
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "abmil_patch_hardneg", "highres", "patch", "patch_hardneg")
+TRAINING_MODES = ("simple", "abmil", "abmil_patch_hardneg", "full", "patch", "patch_hardneg")
 
 # Clave sin guiones ni underscores (ver normalize_mode).
 _NORMALIZED_TO_MODE = {
     "simple": "simple",
     "abmil": "abmil",
     "abmilpatchhardneg": "abmil_patch_hardneg",
-    "highres": "highres",
+    "full": "full",
     "patch": "patch",
     "patchhardneg": "patch_hardneg",
 }
 
-# Entrada fija para MODE=highres (todos los backbones usan el mismo H×W).
-HIGHRES_INPUT_SIZE: tuple[int, int] = (512, 512)
+# Entrada fija para MODE=full (todos los backbones usan el mismo H×W).
+FULL_INPUT_SIZE: tuple[int, int] = (512, 512)
 
 MODE_DESCRIPTIONS: dict[str, str] = {
     "simple": (
         "Clasificador de imagen completa: backbone + GAP + MLP. Baseline sin MIL."
     ),
-    "highres": (
+    "full": (
         "Igual que SIMPLE (backbone + GAP + MLP, sin MIL) pero con entrada fija "
-        f"{HIGHRES_INPUT_SIZE[0]}×{HIGHRES_INPUT_SIZE[1]} para todos los backbones, "
+        f"{FULL_INPUT_SIZE[0]}×{FULL_INPUT_SIZE[1]} para todos los backbones, "
         "en lugar de reescalar al input nativo de cada arquitectura. El backbone es "
         "totalmente convolucional + GAP, asi que acepta esa resolucion sin modificar "
         "capas; mayor uso de memoria y tiempo que SIMPLE."

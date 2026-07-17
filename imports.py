@@ -15,7 +15,7 @@ from tensorflow.keras.applications import EfficientNetB3, EfficientNetB6
 from tensorflow.keras.applications.efficientnet import preprocess_input
 
 
-def set_seed(config) -> None:
+def set_random_seeds(config) -> None:
     """Fija las semillas (random/numpy/tf) desde ``config["GENERAL"]["RANDOM_SEED"]``."""
     seed = config["GENERAL"]["RANDOM_SEED"]
     random.seed(seed)

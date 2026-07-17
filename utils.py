@@ -16,7 +16,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
-from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS, filter_existing_files
+from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS, download_and_build_dataset, filter_existing_files
 from src.dataset_provider import (
     apply_clahe_tf,
     as_tf_dataset,
@@ -47,9 +47,10 @@ __all__ = [
     "release_gpu_memory",
     "resample_train_for_patch",
     "resolve_steps_per_execution",
+    "get_dataset_splits",
     "load_dataset_splits",
     "save_dataset_splits",
-    "stratified_split",
+    "stratified_train_val_test_split",
     "threshold_best_f1",
     "threshold_recall_target",
     "threshold_youden_j",
@@ -144,7 +145,57 @@ def deduplicate_images(
     return out
 
 
-def stratified_split(
+def prepare_dataset(config):
+    """Descarga/arma el dataset y lo etiqueta en positivos/negativos.
+
+    Une ``download_and_build_dataset`` (I/O + columna ``cls``) con
+    ``build_positive_negative_dataset`` (split segun ``POSITIVE_MODE``) y devuelve
+    el DataFrame binario listo para hacer los splits.
+    """
+    data = download_and_build_dataset(config)
+    return build_positive_negative_dataset(config, data["ds"])
+
+
+def build_positive_negative_dataset(config, ds):
+    """Arma el dataset binario positivos/negativos segun ``POSITIVE_MODE``.
+
+    - "mass": positivos = imagenes con ``Mass==1`` (tarea "deteccion de masas").
+      Las imagenes con otro hallazgo pero sin masa se DESCARTAN (no son ni
+      positivo ni negativo limpio).
+    - "full": cualquier hallazgo cuenta como positivo (``cls==1``); no se descarta
+      ninguna fila (positivos U negativos = dataset completo).
+
+    Deduplica por imagen, fuerza ``cls`` a 1.0/0.0 y quita de los negativos las
+    imagenes que ya aparecen como positivas (mismo patient_id/image_id).
+    """
+    positive_mode = config["GENERAL"]["POSITIVE_MODE"]
+    if positive_mode == "mass":
+        positive_mask = ds["Mass"] == 1
+    elif positive_mode == "full":
+        positive_mask = ds["cls"] == 1
+    else:
+        raise ValueError(f"POSITIVE_MODE desconocido: {positive_mode!r} (usar 'mass' o 'full')")
+
+    ds_finding = deduplicate_images(ds[positive_mask].copy())
+    ds_no_finding = deduplicate_images(ds[ds["cls"] == 0].copy())
+    ds_finding["cls"] = 1.0
+    ds_no_finding["cls"] = 0.0
+
+    key = ["patient_id", "image_id"]
+    ds_no_finding = (
+        ds_no_finding.merge(ds_finding[key], on=key, how="left", indicator=True)
+        .query("_merge == 'left_only'")
+        .drop(columns="_merge")
+    )
+    ds = pd.concat([ds_finding, ds_no_finding], ignore_index=True)
+    print(
+        f"POSITIVE_MODE={positive_mode}: {len(ds_finding)} positivos / "
+        f"{len(ds_no_finding)} negativos ({len(ds)} total)"
+    )
+    return ds
+
+
+def stratified_train_val_test_split(
     config,
     ds,
     *,
@@ -322,6 +373,24 @@ def save_dataset_splits(
         f"(train={meta['n_train']}, val={meta['n_val']}, test={meta['n_test']})"
     )
     return path
+
+
+def get_dataset_splits(config, ds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Devuelve train/val/test regenerando o cargando los ids fijos.
+
+    Lo decide ``config["GENERAL"]["REGENERATE_SPLITS"]``:
+
+    - ``True``: regenera el split estratificado, undersamplea los negativos del
+      train y guarda los ids (train ya undersampleado) en ``SPLIT_IDS_PATH``.
+    - ``False``: carga los ids fijos desde ``SPLIT_IDS_PATH`` (no regenera ni
+      undersamplea).
+    """
+    if config["GENERAL"]["REGENERATE_SPLITS"]:
+        train, val, test = stratified_train_val_test_split(config, ds)
+        train = undersample_negatives(config, train)
+        save_dataset_splits(config, train, val, test)
+        return train, val, test
+    return load_dataset_splits(config, ds)
 
 
 def load_dataset_splits(
