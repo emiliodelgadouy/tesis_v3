@@ -48,22 +48,27 @@ def run_training_experiment(
     general = config["GENERAL"]
     training = config["TRAINING"]
     mil = config["MIL"]
+    full_cfg = config.get("FULL") or {}
+    patch_cfg = config.get("PATCH") or {}
+    patch_hardneg_cfg = config.get("PATCH_HARDNEG") or {}
 
     # Parametros derivados de la config (antes se pasaban sueltos por argumento):
-    bag_grid = mil["BAG_GRID"]
+    bag_grid = full_cfg.get("BAG_GRID", (3, 3))
+    bag_canvas_mode = full_cfg.get("BAG_CANVAS_MODE", "resize")
     bag_keras_tiling = mil["BAG_KERAS_TILING"]
-    bag_canvas_mode = mil["BAG_CANVAS_MODE"]
     attention_dim = mil["ATTENTION_DIM"]
     attention_gated = mil["ATTENTION_GATED"]
-    patch_resize_to_bag_canvas = mil["PATCH_RESIZE_TO_BAG_CANVAS"]
-    # Solo el pretrain de patch_hardneg puede alinearse a la grilla del bag.
+    patch_resize_to_bag_canvas = patch_cfg.get("RESIZE_TO_BAG_CANVAS", True)
+    # Solo patch_hardneg puede alinearse a la grilla del bag.
     patch_align_to_bag_grid = (
-        mil["PATCH_PRETRAIN_ALIGN_TO_BAG_GRID"] if mode == "patch_hardneg" else False
+        patch_hardneg_cfg.get("ALIGN_TO_BAG_GRID", False)
+        if mode == "patch_hardneg"
+        else False
     )
     # FULL = misma escala que el canvas ABMIL: BAG_GRID * tamaño nativo del backbone.
     # FULL["INPUT_SIZE"] queda como override opcional (p.ej. pruebas puntuales).
     if mode == "full":
-        full_override = (config.get("FULL") or {}).get("INPUT_SIZE")
+        full_override = full_cfg.get("INPUT_SIZE")
         if full_override is not None:
             input_size = tuple(full_override)
         else:
@@ -80,8 +85,11 @@ def run_training_experiment(
     exp_name = f"{mode}_{backbone_name}"
     is_mil_run = mode in ("abmil", "abmil_patch_hardneg")
     batch_size = mil["BATCH_SIZE"] if is_mil_run else general["BATCH_SIZE"]
-    # Flag compartido: GENERAL puede sobreescribir; si no, usa MIL (tambien fuera de MIL).
-    cache_dataset = general.get("CACHE_DATASET", mil["CACHE_DATASET"])
+    # Default: cache on en simple/patch; off en full/abmil (canvases grandes, >100 GB posibles).
+    cache_dataset = general.get(
+        "CACHE_DATASET",
+        mode not in ("abmil", "abmil_patch_hardneg", "full"),
+    )
 
     # Modos PATCH: se remuestrea train (pos + hard/random neg) segun el ratio de la config,
     # y de ese remuestreo salen focal_alpha e initial_bias. El resto usa el train tal cual.

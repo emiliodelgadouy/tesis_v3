@@ -885,7 +885,7 @@ class TfDatasetConfig:
     # Reescala la imagen al canvas del bag (rows*ph x cols*pw) antes de recortar,
     # para que el parche vea la misma escala que los tiles de ABMIL, pero muestreando
     # libremente con las estrategias roi/avoid_roi (sin fijar a la grilla).
-    # Default alineado con el notebook (MIL.PATCH_RESIZE_TO_BAG_CANVAS).
+    # Default alineado con el notebook (PATCH.RESIZE_TO_BAG_CANVAS).
     patch_resize_to_bag_canvas: bool = True
     return_crop_offset: bool = False
     positive_mixup: bool = False
@@ -2206,13 +2206,15 @@ def build_dataset_provider(
         if config is not None:
             general = config["GENERAL"]
             mil = config["MIL"]
+            full_cfg = config.get("FULL") or {}
+            patch_cfg = config.get("PATCH") or {}
             defaults = {
                 "seed": general["RANDOM_SEED"],
                 "use_clahe": general["USE_CLAHE"],
-                "bag_grid": mil["BAG_GRID"],
+                "bag_grid": full_cfg.get("BAG_GRID", (3, 3)),
                 "bag_keras_tiling": mil["BAG_KERAS_TILING"],
-                "bag_canvas_mode": mil["BAG_CANVAS_MODE"],
-                "patch_resize_to_bag_canvas": mil["PATCH_RESIZE_TO_BAG_CANVAS"],
+                "bag_canvas_mode": full_cfg.get("BAG_CANVAS_MODE", "resize"),
+                "patch_resize_to_bag_canvas": patch_cfg.get("RESIZE_TO_BAG_CANVAS", True),
             }
             # Los kwargs explicitos pisan los defaults del CONFIG.
             kwargs = {**defaults, **kwargs}
