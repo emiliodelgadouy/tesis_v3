@@ -16,7 +16,13 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
-from src.dataset import DEFAULT_CLS_POSITIVE_COLUMNS, DEFAULT_FILTER_COLUMNS, download_and_build_dataset, filter_existing_files
+from src.dataset import (
+    DEFAULT_CLS_POSITIVE_COLUMNS,
+    DEFAULT_FILTER_COLUMNS,
+    DatasetConfig,
+    download_and_build_dataset,
+    filter_existing_files,
+)
 from src.dataset_provider import (
     apply_clahe_tf,
     as_tf_dataset,
@@ -30,6 +36,9 @@ DEFAULT_ROI_NORM_COLUMNS: tuple[str, str, str, str] = (
     "pad_resized_xmax_norm",
     "pad_resized_ymax_norm",
 )
+
+# Misma ruta local que descarga ``DatasetConfig.splits_local`` desde GCS.
+DATASET_SPLITS_PATH = DatasetConfig().splits_local
 
 __all__ = [
     "EpochTimer",
@@ -314,13 +323,14 @@ def save_dataset_splits(
 ) -> Path:
     """Persiste los ids de train/val/test (orden incluido) en JSON o CSV.
 
-    La ruta y la metadata (seed, positive_mode, ratios, ...) salen de
-    ``config["GENERAL"]``. ``metadata`` extra se mergea encima. Guardar el train
-    *despues* del undersample fija tambien el conjunto que ve cada epoca de
-    entrenamiento. El formato se elige por extension: ``.json`` o ``.csv``.
+    La ruta fija es ``DATASET_SPLITS_PATH``. La metadata (seed, positive_mode,
+    ratios, ...) sale de ``config["GENERAL"]``. ``metadata`` extra se mergea
+    encima. Guardar el train *despues* del undersample fija tambien el conjunto
+    que ve cada epoca de entrenamiento. El formato se elige por extension:
+    ``.json`` o ``.csv``.
     """
     general = config["GENERAL"]
-    path = Path(general["SPLIT_IDS_PATH"])
+    path = DATASET_SPLITS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower()
     meta = {
@@ -381,8 +391,8 @@ def get_dataset_splits(config, ds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     Lo decide ``config["GENERAL"]["REGENERATE_SPLITS"]``:
 
     - ``True``: regenera el split estratificado, undersamplea los negativos del
-      train y guarda los ids (train ya undersampleado) en ``SPLIT_IDS_PATH``.
-    - ``False``: carga los ids fijos desde ``SPLIT_IDS_PATH`` (no regenera ni
+      train y guarda los ids (train ya undersampleado) en ``DATASET_SPLITS_PATH``.
+    - ``False``: carga los ids fijos desde ``DATASET_SPLITS_PATH`` (no regenera ni
       undersamplea).
     """
     if config["GENERAL"]["REGENERATE_SPLITS"]:
@@ -404,12 +414,12 @@ def load_dataset_splits(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Carga train/val/test desde un JSON/CSV de ids, en el mismo orden guardado.
 
-    La ruta sale de ``config["GENERAL"]["SPLIT_IDS_PATH"]``. La validacion de IDs
-    corre contra ``ds`` completo; luego, si ``require_existing_files`` es True, se
-    descartan las filas cuya imagen no exista en disco (evita que tf.data falle con
+    La ruta fija es ``DATASET_SPLITS_PATH``. La validacion de IDs corre contra
+    ``ds`` completo; luego, si ``require_existing_files`` es True, se descartan
+    las filas cuya imagen no exista en disco (evita que tf.data falle con
     NotFoundError al leerlas).
     """
-    path = Path(config["GENERAL"]["SPLIT_IDS_PATH"])
+    path = DATASET_SPLITS_PATH
     if not path.is_file():
         raise FileNotFoundError(f"No existe el archivo de splits: {path}")
 

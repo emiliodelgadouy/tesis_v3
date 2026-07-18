@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
-import warnings
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
@@ -618,27 +617,6 @@ def _roi_box_pixels(
     )
 
 
-def _patch_intersects_roi(
-    y0: tf.Tensor,
-    x0: tf.Tensor,
-    ph: int,
-    pw: int,
-    roi_xmin_px: tf.Tensor,
-    roi_ymin_px: tf.Tensor,
-    roi_xmax_px: tf.Tensor,
-    roi_ymax_px: tf.Tensor,
-) -> tf.Tensor:
-    y0f = tf.cast(y0, tf.float32)
-    x0f = tf.cast(x0, tf.float32)
-    phf = tf.cast(ph, tf.float32)
-    pwf = tf.cast(pw, tf.float32)
-    separated = tf.logical_or(
-        tf.logical_or(y0f + phf <= roi_ymin_px, y0f >= roi_ymax_px),
-        tf.logical_or(x0f + pwf <= roi_xmin_px, x0f >= roi_xmax_px),
-    )
-    return tf.logical_not(separated)
-
-
 def _offsets_avoiding_roi(
     max_y: tf.Tensor,
     max_x: tf.Tensor,
@@ -1084,17 +1062,6 @@ def _register_dataframe_show_samples() -> None:
     pd.DataFrame.show_samples = _dataframe_show_samples  # type: ignore[attr-defined]
 
 
-def split_pos_neg(
-    df: pd.DataFrame,
-    *,
-    label_column: str = "cls",
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    labels = df[label_column].astype(float)
-    pos = df[labels >= 0.5].copy()
-    neg = df[labels < 0.5].copy()
-    return pos, neg
-
-
 def hard_negatives_from_positives(
     pos_df: pd.DataFrame,
     *,
@@ -1104,26 +1071,6 @@ def hard_negatives_from_positives(
     hard = pos_df.copy()
     hard[label_column] = 0.0
     return hard
-
-
-def merge_inspect_datasets(
-    *parts: InspectDataset,
-    weights: list[float] | None = None,
-    name: str = "merged",
-) -> InspectDataset:
-    if not parts:
-        raise ValueError("merge_inspect_datasets requiere al menos un dataset")
-    merged = tf.data.Dataset.sample_from_datasets(
-        [part.dataset for part in parts],
-        weights=weights,
-    )
-    row_count = sum(part.row_count or 0 for part in parts)
-    return InspectDataset(
-        merged,
-        name=name,
-        config=parts[0].config,
-        row_count=row_count or None,
-    )
 
 
 class InspectDataset:
@@ -2249,59 +2196,6 @@ def build_dataset_provider(
         provider_config.to_tf_config(),
         lateralize_flip_side=provider_config.lateralize_flip_side,
     )
-
-
-def build_tf_dataset(
-    df: pd.DataFrame,
-    image_size: tuple[int, int] | int | None = None,
-    batch_size: int | None = None,
-    *,
-    shuffle: bool = True,
-    name: str = "dataset",
-    config: DatasetProviderConfig | None = None,
-    as_batched: bool = True,
-    **kwargs: Any,
-) -> InspectDataset | tf.data.Dataset:
-    """Arma un `tf.data.Dataset` batched desde un DataFrame pandas.
-
-    El notebook controla las filas (positivos, hard negatives, etc.) en `df`.
-    Crop por fila segun `cls` si `patch_crop_by_label` es None (default:
-    cls=0 evita ROI, cls=1 centrado en ROI). Para forzar un crop en todo el df:
-    `patch_crop_strategy="roi"`, `"uniform"` o `"avoid_roi"`.
-
-    Returns
-    -------
-    InspectDataset
-        Por defecto; expone `.dataset` (tf.data batched) y utilidades de inspeccion.
-    tf.data.Dataset
-        Si `as_batched=False`, el pipeline sin batch (raro en entrenamiento).
-    """
-    if df.empty:
-        raise ValueError("El DataFrame esta vacio.")
-
-    if config is None:
-        if kwargs:
-            if image_size is None or batch_size is None:
-                raise ValueError(
-                    "Indica `config=DatasetProviderConfig(...)` o image_size y batch_size."
-                )
-            config = DatasetProviderConfig(
-                image_size=image_size,
-                batch_size=batch_size,
-                **kwargs,
-            )
-        else:
-            raise ValueError(
-                "Indica image_size/batch_size o `config=DatasetProviderConfig(...)`."
-            )
-    elif kwargs or image_size is not None or batch_size is not None:
-        raise ValueError("Pasa solo `config` o kwargs sueltos, no ambos.")
-
-    provider = build_dataset_provider(provider_config=config)
-    built = provider.build(df, shuffle=shuffle, name=name)
-    if as_batched:
-        return built
-    return built.dataset
 
 
 _register_dataframe_show_samples()

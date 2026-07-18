@@ -1,18 +1,8 @@
 from __future__ import annotations
-import os
 import random
-from pathlib import Path
-from shutil import copy2
 
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers, mixed_precision
-from tensorflow.keras.applications import EfficientNetB3, EfficientNetB6
-from tensorflow.keras.applications.efficientnet import preprocess_input
 
 
 def set_random_seeds(config) -> None:

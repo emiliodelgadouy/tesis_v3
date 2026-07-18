@@ -32,7 +32,7 @@ from src.comet_logging import (
 )
 from src.dataset import download_and_build_dataset
 from src.dataset_provider import as_tf_dataset, build_dataset_provider, hard_negatives_from_positives
-from src.experiment import evaluate_patch_encoder_on_bags, run_training_experiment
+from src.experiment import run_training_experiment
 from src.imports import set_random_seeds
 from src.modes import normalize_mode
 from src.model_builder import ModelBuilder
@@ -83,7 +83,6 @@ __all__ = [
     "build_dataset_provider",
     "hard_negatives_from_positives",
     # experiment
-    "evaluate_patch_encoder_on_bags",
     "run_training_experiment",
     # imports
     "set_random_seeds",

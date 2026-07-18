@@ -1,14 +1,10 @@
 """Drivers de experimentos para los notebooks de entrenamiento.
 
-Contiene la logica de una corrida completa (``run_training_experiment``) y la evaluacion
-zero-shot del encoder de patches sobre bags (``evaluate_patch_encoder_on_bags``),
-extraidas de los notebooks para que las celdas queden en una sola llamada.
+Contiene la logica de una corrida completa (``run_training_experiment``),
+extraida de los notebooks para que las celdas queden en una sola llamada.
 """
 
 from __future__ import annotations
-
-import numpy as np
-import tensorflow as tf
 
 from src.backbones import resolve_backbone
 from src.comet_logging import (
@@ -19,7 +15,7 @@ from src.comet_logging import (
     log_training_timing_summary,
     start_training_experiment,
 )
-from src.dataset_provider import as_tf_dataset, build_dataset_provider
+from src.dataset_provider import build_dataset_provider
 from src.model_builder import ModelBuilder
 from src.utils import (
     TrainingTimer,
@@ -34,44 +30,6 @@ from src.utils import (
     threshold_recall_target,
     threshold_youden_j,
 )
-
-
-def evaluate_patch_encoder_on_bags(
-    config, pretrained_builder, eval_df, *, split_name="val"
-):
-    """AUC por imagen sin ROI en inferencia: score del bag = max score de sus tiles."""
-    from sklearn.metrics import roc_auc_score
-
-    mil = config["MIL"]
-    provider = build_dataset_provider(
-        config,
-        pretrained_builder.IMG_SIZE,
-        mil["BATCH_SIZE"],
-        lateralize=True,
-        mode="abmil",
-        bag_keras_tiling=False,
-        cache_dataset=False,
-    )
-    bag_ds = provider.build_eval(eval_df, name=f"{split_name}_zero_shot_bags")
-    labels_all, probs_all = [], []
-    h, w = pretrained_builder.IMG_SIZE
-    for bags, labels in as_tf_dataset(bag_ds):
-        flat_tiles = tf.reshape(bags, [-1, h, w, 3])
-        instance_scores = pretrained_builder.model(flat_tiles, training=False)
-        if pretrained_builder.loss_from_logits:
-            instance_scores = tf.sigmoid(instance_scores)
-        instance_scores = tf.reshape(
-            instance_scores, [tf.shape(bags)[0], tf.shape(bags)[1]]
-        )
-        probs_all.append(tf.reduce_max(instance_scores, axis=1).numpy())
-        labels_all.append(tf.reshape(labels, [-1]).numpy())
-    y_true = np.concatenate(labels_all)
-    y_prob = np.concatenate(probs_all)
-    auc = float(roc_auc_score(y_true, y_prob))
-    print(
-        f"PATCH zero-shot bag {split_name}_auc={auc:.4f} (todos los tiles, max-pooling, sin ROI en inferencia)"
-    )
-    return auc
 
 
 def run_training_experiment(
@@ -193,10 +151,6 @@ def run_training_experiment(
             run_config["PRETRAINED_FROM"] = f"{pretraining_mode}_{backbone_name}"
             run_config["PRETRAINED_BEST_VAL_METRIC"] = pretrain_best["value"]
             run_config["PRETRAINED_FROZEN_STAGE1"] = ["backbone", "dense", "output"]
-            if hasattr(pretrained_builder, "zero_shot_bag_val_auc"):
-                run_config["PRETRAINED_ZERO_SHOT_BAG_VAL_AUC"] = (
-                    pretrained_builder.zero_shot_bag_val_auc
-                )
 
         steps_per_execution = resolve_steps_per_execution(
             len(train_df),

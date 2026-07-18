@@ -25,8 +25,6 @@ from src.dataset_provider import as_tf_dataset
 
 # Defaults; el notebook puede sobreescribir COMET_* y pasarlos a login_comet()/start_training_experiment().
 COMET_API_KEY = os.environ.get("COMET_API_KEY", "")
-COMET_PROJECT = "tesis-reni"
-COMET_N_SAMPLE_IMAGES = 8
 # Comet rechaza nombres de imagen/figura con mas de 100 caracteres.
 COMET_MAX_IMAGE_NAME_LEN = 100
 

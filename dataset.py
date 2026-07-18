@@ -33,8 +33,10 @@ class DatasetConfig:
     data_dirname: str = "mammo"
     gcs_images_tar: str = "gs://helen-data/square_images.tar.gz"
     gcs_data_csv: str = "gs://helen-data/square_data.csv"
+    gcs_splits_json: str = "gs://helen-data/dataset_splits.json"
     tar_filename: str = "square_images.tar.gz"
     csv_filename: str = "square_data.csv"
+    splits_filename: str = "dataset_splits.json"
     download_from_gcs: bool = True
     extract_images: bool = True
     filter_columns: tuple[str, ...] = DEFAULT_FILTER_COLUMNS
@@ -55,6 +57,10 @@ class DatasetConfig:
         return self.data_dir / "raw" / "csv"
 
     @property
+    def splits_dir(self) -> Path:
+        return self.root_dir / "splits"
+
+    @property
     def csv_main(self) -> Path:
         return self.raw_csv_dir / self.csv_filename
 
@@ -62,9 +68,13 @@ class DatasetConfig:
     def tar_local(self) -> Path:
         return self.raw_img_dir / self.tar_filename
 
+    @property
+    def splits_local(self) -> Path:
+        return self.splits_dir / self.splits_filename
+
 
 def ensure_dataset_dirs(config: DatasetConfig) -> None:
-    for directory in (config.raw_img_dir, config.raw_csv_dir):
+    for directory in (config.raw_img_dir, config.raw_csv_dir, config.splits_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -117,6 +127,11 @@ def ensure_dataset_downloaded(config: DatasetConfig) -> None:
         _download_from_gcs(config.gcs_data_csv, config.csv_main)
         print("CSV downloaded")
 
+    if not config.splits_local.is_file() or config.splits_local.stat().st_size == 0:
+        print("Downloading dataset splits...")
+        _download_from_gcs(config.gcs_splits_json, config.splits_local)
+        print(f"Splits downloaded to {config.splits_local}")
+
 
 def load_raw_dataframe(config: DatasetConfig) -> pd.DataFrame:
     ensure_dataset_downloaded(config)
@@ -128,15 +143,6 @@ def load_raw_dataframe(config: DatasetConfig) -> pd.DataFrame:
         axis=1,
     )
     return ds_raw
-
-
-def load_filtered_dataframe(config: DatasetConfig) -> pd.DataFrame:
-    ds_raw = load_raw_dataframe(config)
-    missing_columns = [column for column in config.filter_columns if column not in ds_raw.columns]
-    if missing_columns:
-        raise KeyError(f"Faltan columnas para el filtrado: {missing_columns}")
-
-    return ds_raw[ds_raw[list(config.filter_columns)].eq(1).any(axis=1)].copy()
 
 
 def add_cls_column(df: pd.DataFrame, config: DatasetConfig) -> pd.DataFrame:
