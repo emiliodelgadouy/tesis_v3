@@ -508,36 +508,26 @@ def _eval_tf_dataset(dataset):
     return as_tf_dataset(dataset)
 
 
-def predict_probs_and_labels(model, dataset, *, use_tta: bool = False) -> tuple[np.ndarray, np.ndarray]:
+def predict_probs_and_labels(model, dataset) -> tuple[np.ndarray, np.ndarray]:
     """Una sola pasada sobre el dataset: devuelve (y_true, y_prob) alineados.
 
     Itera el pipeline ``tf.data`` una sola vez, tomando labels y logits del mismo
     batch (en vez de recorrerlo dos veces decodificando/croppeando las imagenes en
-    cada pasada). Con ``use_tta=True`` promedia la prediccion con su espejo
-    horizontal (segunda pasada solo si TTA esta activo).
+    cada pasada).
     """
     eval_ds = _eval_tf_dataset(dataset)
     keras_model = model.model if hasattr(model, "model") else model
 
     labels_batches: list[np.ndarray] = []
     logits_batches: list[np.ndarray] = []
-    flip_logits_batches: list[np.ndarray] = []
     for xb, yb in eval_ds:
         labels_batches.append(np.asarray(yb, dtype=np.int64).reshape(-1))
         logits_batches.append(
             np.asarray(keras_model.predict_on_batch(xb), dtype=np.float64).reshape(-1)
         )
-        if use_tta:
-            flip_logits_batches.append(
-                np.asarray(
-                    keras_model.predict_on_batch(_flip_inputs_tta(xb)), dtype=np.float64
-                ).reshape(-1)
-            )
 
     y_true = np.concatenate(labels_batches)
     y_prob = _sigmoid(np.concatenate(logits_batches))
-    if use_tta:
-        y_prob = (y_prob + _sigmoid(np.concatenate(flip_logits_batches))) / 2.0
     return y_true, y_prob
 
 
@@ -598,13 +588,6 @@ def resample_train_for_patch(
     bias = logit_initial_bias(int((train_patch[label_column] == 1).sum()), int((train_patch[label_column] == 0).sum()))
     print("resample_train_for_patch:", {"POSITIVE": len(positive_final), "HARD_NEGATIVE": len(hard_negative_final), "RANDOM_NEGATIVE": len(random_negative_final), "TOTAL": len(train_patch), "FRAC_NEG": round(float(frac_neg), 3)})
     return train_patch, float(frac_neg), bias
-
-
-def _flip_inputs_tta(x: tf.Tensor) -> tf.Tensor:
-    """Flip horizontal para imagen (B,H,W,C) o bag MIL pre-tiled (B,K,H,W,C)."""
-    if x.shape.rank == 5:
-        return tf.reverse(x, axis=[3])
-    return tf.image.flip_left_right(x)
 
 
 def threshold_youden_j(y_true, y_prob) -> float:

@@ -277,40 +277,31 @@ def run_training_experiment(
         log_training_timing_summary(experiment, training_timer)
         best_global_checkpoint = model.load_best_global_checkpoint()
 
-        use_tta = general["USE_TTA"]
         log_keras_eval_metrics(
             experiment,
             model,
-            train_ds=train_ds if general["EVAL_TRAIN_METRICS"] else None,
+            train_ds=train_ds,
             val_ds=val_ds,
             test_ds=ds_test,
         )
 
         # Una sola pasada por split (labels + probabilidades juntas) en vez de
         # recorrer el pipeline tf.data dos veces (labels_from_tf_dataset + predict).
-        y_train_true = y_train_prob = None
-        if general["EVAL_TRAIN_METRICS"]:
-            y_train_true, y_train_prob = predict_probs_and_labels(
-                model, train_ds.ordered(), use_tta=use_tta
-            )
-        y_val_true, y_val_prob = predict_probs_and_labels(
-            model, val_ds, use_tta=use_tta
+        y_train_true, y_train_prob = predict_probs_and_labels(
+            model, train_ds.ordered()
         )
-        y_test_true, y_test_prob = predict_probs_and_labels(
-            model, ds_test, use_tta=use_tta
-        )
+        y_val_true, y_val_prob = predict_probs_and_labels(model, val_ds)
+        y_test_true, y_test_prob = predict_probs_and_labels(model, ds_test)
 
         thr_youden = threshold_youden_j(y_val_true, y_val_prob)
         thr_recall90 = threshold_recall_target(
             y_val_true, y_val_prob, target_recall=0.90
         )
 
-        y_train_pred_default = y_train_pred_youden = None
-        if general["EVAL_TRAIN_METRICS"]:
-            y_train_pred_default = apply_probability_threshold(
-                y_train_prob, general["PROBABILITY_THRESHOLD"]
-            )
-            y_train_pred_youden = apply_probability_threshold(y_train_prob, thr_youden)
+        y_train_pred_default = apply_probability_threshold(
+            y_train_prob, general["PROBABILITY_THRESHOLD"]
+        )
+        y_train_pred_youden = apply_probability_threshold(y_train_prob, thr_youden)
         y_val_pred_default = apply_probability_threshold(
             y_val_prob, general["PROBABILITY_THRESHOLD"]
         )

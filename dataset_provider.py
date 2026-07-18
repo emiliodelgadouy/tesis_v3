@@ -853,7 +853,7 @@ def positive_only_mixup_batch(
 
 
 def _dataset_deterministic_options(ds: tf.data.Dataset) -> tf.data.Dataset:
-    """Orden estable para eval, TTA y alineacion con tablas fuente."""
+    """Orden estable para eval y alineacion con tablas fuente."""
     opts = tf.data.Options()
     if hasattr(opts, "deterministic"):
         opts.deterministic = True
