@@ -6,7 +6,7 @@ extraida de los notebooks para que las celdas queden en una sola llamada.
 
 from __future__ import annotations
 
-from src.backbones import resolve_backbone
+from src.backbones import get_backbone, resolve_backbone
 from src.comet_logging import (
     log_dataset_class_counts,
     log_deterministic_input_samples,
@@ -16,6 +16,7 @@ from src.comet_logging import (
     start_training_experiment,
 )
 from src.dataset_provider import build_dataset_provider
+from src.modes import normalize_mode
 from src.model_builder import ModelBuilder
 from src.utils import (
     TrainingTimer,
@@ -43,6 +44,7 @@ def run_training_experiment(
     pretrained_builder=None,
     return_builder=False,
 ):
+    mode = normalize_mode(mode)
     general = config["GENERAL"]
     training = config["TRAINING"]
     mil = config["MIL"]
@@ -58,9 +60,17 @@ def run_training_experiment(
     patch_align_to_bag_grid = (
         mil["PATCH_PRETRAIN_ALIGN_TO_BAG_GRID"] if mode == "patch_hardneg" else False
     )
-    bag_size = None
-    # FULL entra a la misma escala que el canvas de ABMIL; el resto resuelve segun backbone.
-    input_size = config["FULL"]["INPUT_SIZE"] if mode == "full" else None
+    # FULL = misma escala que el canvas ABMIL: BAG_GRID * tamaño nativo del backbone.
+    # FULL["INPUT_SIZE"] queda como override opcional (p.ej. pruebas puntuales).
+    if mode == "full":
+        full_override = (config.get("FULL") or {}).get("INPUT_SIZE")
+        if full_override is not None:
+            input_size = tuple(full_override)
+        else:
+            native_h, native_w = get_backbone(backbone_name).input_size
+            input_size = (bag_grid[0] * native_h, bag_grid[1] * native_w)
+    else:
+        input_size = None
 
     experiment = model = builder = backbone = dataset_provider = train_ds = val_ds = (
         ds_test
@@ -70,7 +80,8 @@ def run_training_experiment(
     exp_name = f"{mode}_{backbone_name}"
     is_mil_run = mode in ("abmil", "abmil_patch_hardneg")
     batch_size = mil["BATCH_SIZE"] if is_mil_run else general["BATCH_SIZE"]
-    cache_dataset = mil["CACHE_DATASET"] if is_mil_run else True
+    # Flag compartido: GENERAL puede sobreescribir; si no, usa MIL (tambien fuera de MIL).
+    cache_dataset = general.get("CACHE_DATASET", mil["CACHE_DATASET"])
 
     # Modos PATCH: se remuestrea train (pos + hard/random neg) segun el ratio de la config,
     # y de ese remuestreo salen focal_alpha e initial_bias. El resto usa el train tal cual.
@@ -84,10 +95,16 @@ def run_training_experiment(
             train_df, patch_ratio, general["RANDOM_SEED"]
         )
     else:
-        focal_alpha = (train_df["cls"] == 0).sum() / len(train_df)
-        bias = logit_initial_bias(
-            int((train_df["cls"] == 1).sum()), int((train_df["cls"] == 0).sum())
-        )
+        if len(train_df) == 0:
+            raise ValueError("train_df esta vacio; no se puede calcular focal_alpha/bias")
+        n_pos = int((train_df["cls"] == 1).sum())
+        n_neg = int((train_df["cls"] == 0).sum())
+        if n_pos == 0 or n_neg == 0:
+            raise ValueError(
+                f"train_df necesita ambas clases; recibido pos={n_pos}, neg={n_neg}"
+            )
+        focal_alpha = n_neg / len(train_df)
+        bias = logit_initial_bias(n_pos, n_neg)
 
     try:
         if pretrained_builder is not None:
@@ -141,8 +158,7 @@ def run_training_experiment(
             run_config["BAG_INSTANCES"] = bag_grid[0] * bag_grid[1]
             run_config["ATTENTION_DIM"] = attention_dim
             run_config["ATTENTION_GATED"] = attention_gated
-            if bag_size is not None:
-                run_config["BAG_SIZE"] = bag_size
+            run_config["BAG_SIZE"] = bag_grid[0] * bag_grid[1]
         if pretrained_builder is not None:
             pretrain_best = pretrained_builder.load_best_global_checkpoint()
             pretraining_mode = getattr(
@@ -167,7 +183,6 @@ def run_training_experiment(
             mode=mode,
             initial_bias=bias,
             focal_alpha=focal_alpha,
-            bag_size=bag_size,
             pretrained_builder=pretrained_builder,
             checkpoint_prefix=exp_name,
             lateralized_inputs=True,
@@ -304,6 +319,7 @@ def run_training_experiment(
                 experiment.end()
             except Exception:
                 pass
+        raise
     finally:
         keep_builder = return_builder and result_builder is not None
         del dataset_provider, train_ds, val_ds, ds_test

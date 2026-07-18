@@ -218,6 +218,8 @@ def _bag_to_montage(bag: np.ndarray) -> np.ndarray:
 def _prepare_image_for_logging(img: np.ndarray) -> np.ndarray:
     """Devuelve float32 en [0, 1] listo para imshow."""
     img = np.asarray(img)
+    if img.size == 0:
+        return np.zeros((1, 1, 3), dtype=np.float32)
     if img.ndim == 4:
         img = _bag_to_montage(img)
     arr = img.astype(np.float32)
@@ -312,44 +314,93 @@ def _input_sample_name(
         elif "path" in row.index and pd.notna(row["path"]):
             id_segment = _comet_slug(Path(str(row["path"])).stem)
 
-    # idx siempre presente -> garantiza unicidad aunque haya que recortar id_segment.
-    suffix_parts = [f"idx{dataset_idx:04d}", f"label{label}"]
-    fixed = "/".join(prefix_parts + suffix_parts)
+    # idx/label siempre presentes: se recorta el prefijo/id, nunca el sufijo.
+    suffix = f"idx{dataset_idx:04d}/label{label}"
+    prefix = "/".join(prefix_parts)
     if id_segment is None:
-        return fixed[:max_len]
+        full = f"{prefix}/{suffix}"
+        if len(full) <= max_len:
+            return full
+        keep = max_len - len(suffix) - 1
+        return f"{prefix[: max(0, keep)]}/{suffix}" if keep > 0 else suffix[:max_len]
 
-    # Espacio disponible para el id_segment respetando el limite de Comet (+1 por el "/").
-    available = max_len - len(fixed) - 1
+    available = max_len - len(prefix) - len(suffix) - 2
     if available <= 0:
-        return fixed[:max_len]
+        keep = max_len - len(suffix) - 1
+        return f"{prefix[: max(0, keep)]}/{suffix}" if keep > 0 else suffix[:max_len]
     if len(id_segment) > available:
         id_segment = id_segment[:available]
-    return "/".join(prefix_parts + [id_segment] + suffix_parts)
+    return f"{prefix}/{id_segment}/{suffix}"
 
 
-def _collect_dataset_images_labels(dataset) -> tuple[np.ndarray, np.ndarray]:
-    """Lee imagenes/etiquetas en orden estable (pre-augmentacion del tf.data)."""
+def _collect_bounded_dataset_samples(
+    dataset,
+    *,
+    n_samples: int,
+    random_seed: int,
+) -> list[tuple[int, np.ndarray, int]]:
+    """Elige muestras estables y balanceadas sin materializar todo el dataset.
+
+    Conserva como maximo ``n_samples`` imagenes por clase. Si ambas clases estan
+    presentes, deja de iterar apenas tiene suficientes candidatos balanceados.
+    """
+    if n_samples <= 0:
+        return []
+
     if hasattr(dataset, "ordered"):
         source = dataset.ordered()
     else:
         source = as_tf_dataset(dataset)
 
-    images_batches: list[np.ndarray] = []
-    labels_batches: list[np.ndarray] = []
+    candidates_by_label: dict[int, list[tuple[int, np.ndarray, int]]] = {
+        0: [],
+        1: [],
+    }
+    per_group = max(1, n_samples // len(candidates_by_label))
+    dataset_idx = 0
+
     for images_batch, labels_batch in source:
-        images_batches.append(np.asarray(images_batch))
-        labels_batches.append(np.asarray(labels_batch).reshape(-1))
+        images = np.asarray(images_batch)
+        labels = np.asarray(labels_batch).reshape(-1)
+        if len(images) != len(labels):
+            raise ValueError(
+                f"Mismatch imagenes ({len(images)}) vs etiquetas ({len(labels)}) "
+                "al loguear muestras."
+            )
 
-    if not images_batches:
-        raise ValueError("El dataset no produjo batches al loguear muestras de entrada.")
+        for image, raw_label in zip(images, labels):
+            label = int(float(raw_label) >= 0.5)
+            bucket = candidates_by_label[label]
+            if len(bucket) < n_samples:
+                # Copiar evita que una vista de una muestra retenga el batch completo.
+                bucket.append((dataset_idx, np.array(image, copy=True), label))
+            dataset_idx += 1
 
-    images = np.concatenate(images_batches, axis=0)
-    labels = np.concatenate(labels_batches, axis=0).astype(int).reshape(-1)
-    if len(images) != len(labels):
-        raise ValueError(
-            f"Mismatch imagenes ({len(images)}) vs etiquetas ({len(labels)}) al loguear muestras."
+        candidates_seen = sum(len(bucket) for bucket in candidates_by_label.values())
+        balanced = all(
+            len(bucket) >= per_group for bucket in candidates_by_label.values()
         )
-    return images, labels
+        if balanced and candidates_seen >= n_samples:
+            break
+
+    candidates = sorted(
+        (
+            sample
+            for bucket in candidates_by_label.values()
+            for sample in bucket
+        ),
+        key=lambda sample: sample[0],
+    )
+    if not candidates:
+        return []
+
+    candidate_labels = np.asarray([sample[2] for sample in candidates], dtype=int)
+    picked = _fixed_sample_indices(
+        candidate_labels,
+        n_samples=n_samples,
+        random_seed=random_seed,
+    )
+    return [candidates[idx] for idx in picked]
 
 
 def _array_to_pil_rgb(arr: np.ndarray):
@@ -402,9 +453,12 @@ def log_deterministic_input_samples(
     if n_samples <= 0:
         return
 
-    images, y_true = _collect_dataset_images_labels(dataset)
-    picked = _fixed_sample_indices(y_true, n_samples=n_samples, random_seed=random_seed)
-    if not picked:
+    samples = _collect_bounded_dataset_samples(
+        dataset,
+        n_samples=n_samples,
+        random_seed=random_seed,
+    )
+    if not samples:
         return
 
     exp_name = _resolve_experiment_name(experiment, experiment_name)
@@ -412,8 +466,7 @@ def log_deterministic_input_samples(
     if source_table is not None:
         source_table = source_table.reset_index(drop=True)
 
-    for slot, idx in enumerate(picked):
-        label = int(y_true[idx] >= 0.5)
+    for slot, (idx, image, label) in enumerate(samples):
         row = source_table.iloc[idx] if source_table is not None and idx < len(source_table) else None
         name = _input_sample_name(
             experiment_name=exp_name,
@@ -422,14 +475,14 @@ def log_deterministic_input_samples(
             label=label,
             row=row,
         )
-        pil_image = _array_to_pil_rgb(images[idx])
+        pil_image = _array_to_pil_rgb(image)
         metadata = _sample_metadata(
             experiment_name=exp_name,
             split_name=split_name,
             dataset_idx=idx,
             label=label,
             row=row,
-            image_shape=tuple(int(dim) for dim in np.asarray(images[idx]).shape),
+            image_shape=tuple(int(dim) for dim in image.shape),
         )
         metadata["sample_slot"] = int(slot)
         experiment.log_image(
@@ -503,6 +556,8 @@ def _log_split_eval(
     key = split_name.lower()
     y_true = np.asarray(y_true).astype(int).reshape(-1)
     y_prob = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+    n_classes = int(np.unique(y_true).size) if y_true.size else 0
+    can_curve = y_true.size >= 2 and n_classes >= 2
 
     _log_split_confusion_matrices(
         experiment,
@@ -515,6 +570,22 @@ def _log_split_eval(
         thr_youden=thr_youden,
         show_plots=show_plots,
     )
+
+    if not can_curve:
+        experiment.log_metrics(
+            {
+                f"{key}_n": int(len(y_true)),
+                f"{key}_neg": int(len(y_true) - np.sum(y_true >= 0.5)),
+                f"{key}_pos": int(np.sum(y_true >= 0.5)),
+                f"{key}_roc_auc": float("nan"),
+                f"{key}_pr_auc": float("nan"),
+            }
+        )
+        experiment.log_other(
+            f"{key}_eval_warning",
+            "Curvas ROC/PR omitidas: split vacio o con una sola clase",
+        )
+        return
 
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     prec, rec, _ = precision_recall_curve(y_true, y_prob)

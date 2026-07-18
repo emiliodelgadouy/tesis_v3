@@ -10,7 +10,8 @@ class AbmilModelBuilder(MilModelBuilderBase):
         return GatedAttentionPooling(attention_dim=self.attention_dim, gated=self.attention_gated, name="attention_pooling")(x)
 
     def build_keras_tiling(self):
-        self.model_name = "abmil_keras_tiling"
+        # Conserva la identidad del submodo (p.ej. abmil_patch_hardneg).
+        self.model_name = f"{type(self).model_name}_keras_tiling"
         return super().build_keras_tiling()
 
 

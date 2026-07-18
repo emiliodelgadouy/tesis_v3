@@ -96,11 +96,16 @@ def _download_from_gcs(source: str, destination_file: Path) -> None:
                 f.write(chunk)
 
 
+_EXTRACT_MARKER_NAME = ".extract_complete"
+
+
+def _extract_marker_path(config: DatasetConfig) -> Path:
+    return config.raw_img_dir / _EXTRACT_MARKER_NAME
+
+
 def _has_extracted_images(config: DatasetConfig) -> bool:
-    return any(
-        path.is_file() and path.name != config.tar_filename
-        for path in config.raw_img_dir.rglob("*")
-    )
+    # Marker escrito al terminar extractall; evita saltar re-extract por residuos parciales.
+    return _extract_marker_path(config).is_file()
 
 
 def ensure_dataset_downloaded(config: DatasetConfig) -> None:
@@ -120,6 +125,7 @@ def ensure_dataset_downloaded(config: DatasetConfig) -> None:
         print("Extracting images...")
         with tarfile.open(config.tar_local, "r:gz") as tar:
             tar.extractall(config.raw_img_dir)
+        _extract_marker_path(config).write_text("ok\n", encoding="utf-8")
         print(f"Images extracted to {config.raw_img_dir}")
 
     if not config.csv_main.is_file() or config.csv_main.stat().st_size == 0:
@@ -206,7 +212,11 @@ def download_and_build_dataset(
         raise KeyError(f"Faltan columnas para el filtrado: {missing_columns}")
 
     ds_raw = add_cls_column(ds_raw, dataset_config)
-    ds = ds_raw[ds_raw[list(dataset_config.filter_columns)].eq(1).any(axis=1)].copy()
+    ds = ds_raw[
+        ds_raw[list(dataset_config.filter_columns)]
+        .eq(dataset_config.cls_positive_value)
+        .any(axis=1)
+    ].copy()
     if reduced:
         ds = _sample_dataframe(ds, sample_fraction, sample_seed)
 

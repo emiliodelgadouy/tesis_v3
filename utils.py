@@ -40,6 +40,14 @@ DEFAULT_ROI_NORM_COLUMNS: tuple[str, str, str, str] = (
 # Misma ruta local que descarga ``DatasetConfig.splits_local`` desde GCS.
 DATASET_SPLITS_PATH = DatasetConfig().splits_local
 
+
+def resolve_dataset_splits_path(config) -> Path:
+    """Ruta de splits: el dataset reducido usa un archivo aparte para no pisar el canonico."""
+    path = DATASET_SPLITS_PATH
+    if config.get("GENERAL", {}).get("REDUCED_DATASET"):
+        return path.with_name(f"{path.stem}_reduced{path.suffix}")
+    return path
+
 __all__ = [
     "EpochTimer",
     "MemoryEpochLogger",
@@ -48,13 +56,16 @@ __all__ = [
     "run_training_stage",
     "apply_clahe_tf",
     "apply_probability_threshold",
+    "build_positive_negative_dataset",
     "decode_image",
     "deduplicate_images",
     "dispose_model_builder",
     "logit_initial_bias",
     "predict_probs_and_labels",
+    "prepare_dataset",
     "release_gpu_memory",
     "resample_train_for_patch",
+    "resolve_dataset_splits_path",
     "resolve_steps_per_execution",
     "get_dataset_splits",
     "load_dataset_splits",
@@ -214,12 +225,16 @@ def stratified_train_val_test_split(
     label_column="cls",
     group_column="patient_id",
 ):
-    val_split = config["GENERAL"]["VALIDATION_SPLIT_RATIO"]
+    val_split = float(config["GENERAL"]["VALIDATION_SPLIT_RATIO"])
+    if not (0.0 < val_split < 1.0):
+        raise ValueError(
+            f"VALIDATION_SPLIT_RATIO debe estar en (0, 1); recibido {val_split!r}"
+        )
     seed = config["GENERAL"]["RANDOM_SEED"]
     tbl_training_full = ds[ds[split_column] == train_split_value].reset_index(drop=True)
     tbl_test = ds[ds[split_column] == test_split_value].reset_index(drop=True)
 
-    n_splits = round(1 / val_split)
+    n_splits = max(2, round(1 / val_split))
     sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     train_idx, val_idx = next(
         sgkf.split(
@@ -323,14 +338,14 @@ def save_dataset_splits(
 ) -> Path:
     """Persiste los ids de train/val/test (orden incluido) en JSON o CSV.
 
-    La ruta fija es ``DATASET_SPLITS_PATH``. La metadata (seed, positive_mode,
-    ratios, ...) sale de ``config["GENERAL"]``. ``metadata`` extra se mergea
-    encima. Guardar el train *despues* del undersample fija tambien el conjunto
-    que ve cada epoca de entrenamiento. El formato se elige por extension:
-    ``.json`` o ``.csv``.
+    La ruta sale de ``resolve_dataset_splits_path`` (canonico o ``*_reduced``).
+    La metadata (seed, positive_mode, ratios, ...) sale de ``config["GENERAL"]``.
+    ``metadata`` extra se mergea encima. Guardar el train *despues* del
+    undersample fija tambien el conjunto que ve cada epoca de entrenamiento.
+    El formato se elige por extension: ``.json`` o ``.csv``.
     """
     general = config["GENERAL"]
-    path = DATASET_SPLITS_PATH
+    path = resolve_dataset_splits_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     suffix = path.suffix.lower()
     meta = {
@@ -385,6 +400,24 @@ def save_dataset_splits(
     return path
 
 
+def _assert_binary_split_ready(
+    df: pd.DataFrame,
+    *,
+    split_name: str,
+    label_column: str = "cls",
+) -> None:
+    """Falla temprano si un split esta vacio o no tiene ambas clases."""
+    if len(df) == 0:
+        raise ValueError(f"Split {split_name!r} quedo vacio")
+    n_pos = int((df[label_column] >= 0.5).sum())
+    n_neg = int(len(df) - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        raise ValueError(
+            f"Split {split_name!r} necesita ambas clases; "
+            f"recibido pos={n_pos}, neg={n_neg}, total={len(df)}"
+        )
+
+
 def get_dataset_splits(config, ds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Devuelve train/val/test regenerando o cargando los ids fijos.
 
@@ -398,9 +431,14 @@ def get_dataset_splits(config, ds: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     if config["GENERAL"]["REGENERATE_SPLITS"]:
         train, val, test = stratified_train_val_test_split(config, ds)
         train = undersample_negatives(config, train)
+        for name, frame in (("train", train), ("val", val), ("test", test)):
+            _assert_binary_split_ready(frame, split_name=name)
         save_dataset_splits(config, train, val, test)
         return train, val, test
-    return load_dataset_splits(config, ds)
+    train, val, test = load_dataset_splits(config, ds)
+    for name, frame in (("train", train), ("val", val), ("test", test)):
+        _assert_binary_split_ready(frame, split_name=name)
+    return train, val, test
 
 
 def load_dataset_splits(
@@ -414,12 +452,12 @@ def load_dataset_splits(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Carga train/val/test desde un JSON/CSV de ids, en el mismo orden guardado.
 
-    La ruta fija es ``DATASET_SPLITS_PATH``. La validacion de IDs corre contra
-    ``ds`` completo; luego, si ``require_existing_files`` es True, se descartan
-    las filas cuya imagen no exista en disco (evita que tf.data falle con
-    NotFoundError al leerlas).
+    La ruta sale de ``resolve_dataset_splits_path``. La validacion de IDs corre
+    contra ``ds`` completo; luego, si ``require_existing_files`` es True, se
+    descartan las filas cuya imagen no exista en disco (evita que tf.data falle
+    con NotFoundError al leerlas).
     """
-    path = DATASET_SPLITS_PATH
+    path = resolve_dataset_splits_path(config)
     if not path.is_file():
         raise FileNotFoundError(f"No existe el archivo de splits: {path}")
 
@@ -491,8 +529,11 @@ def load_dataset_splits(
     return train, val, test
 
 
-def logit_initial_bias(n_positive: int, n_negative: int) -> float:
-    return float(np.log(n_positive / n_negative))
+def logit_initial_bias(n_positive: int, n_negative: int, *, eps: float = 1e-6) -> float:
+    """Log-odds inicial; evita division por cero / ±inf con conteos nulos."""
+    n_pos = max(float(n_positive), eps)
+    n_neg = max(float(n_negative), eps)
+    return float(np.log(n_pos / n_neg))
 
 
 def resolve_steps_per_execution(
@@ -536,6 +577,9 @@ def predict_probs_and_labels(model, dataset) -> tuple[np.ndarray, np.ndarray]:
             np.asarray(keras_model.predict_on_batch(xb), dtype=np.float64).reshape(-1)
         )
 
+    if not labels_batches:
+        return np.asarray([], dtype=np.int64), np.asarray([], dtype=np.float64)
+
     y_true = np.concatenate(labels_batches)
     y_prob = _sigmoid(np.concatenate(logits_batches))
     return y_true, y_prob
@@ -555,11 +599,18 @@ def undersample_negatives(
 
     ``ratio`` y ``seed`` salen de ``config["GENERAL"]``.
     """
-    ratio = config["GENERAL"]["NO_FINDING_TO_FINDING_RATIO"]
+    ratio = float(config["GENERAL"]["NO_FINDING_TO_FINDING_RATIO"])
     seed = config["GENERAL"]["RANDOM_SEED"]
     pos = df[df[label_column] >= 0.5]
     neg = df[df[label_column] < 0.5]
-    n_neg = min(len(neg), len(pos) * ratio)
+    if len(pos) == 0:
+        raise ValueError("undersample_negatives: no hay positivos en el DataFrame")
+    n_neg = int(min(len(neg), int(round(len(pos) * ratio))))
+    if n_neg <= 0:
+        raise ValueError(
+            f"undersample_negatives: n_neg={n_neg} invalido "
+            f"(pos={len(pos)}, neg={len(neg)}, ratio={ratio})"
+        )
     neg = neg.sample(n=n_neg, random_state=seed)
     out = pd.concat([pos, neg], ignore_index=True)
     return out.sample(frac=1.0, random_state=seed).reset_index(drop=True)
@@ -600,36 +651,71 @@ def resample_train_for_patch(
     return train_patch, float(frac_neg), bias
 
 
-def threshold_youden_j(y_true, y_prob) -> float:
+def _threshold_inputs_ok(y_true, y_prob) -> bool:
+    y_true = np.asarray(y_true).reshape(-1)
+    y_prob = np.asarray(y_prob).reshape(-1)
+    if y_true.size == 0 or y_prob.size == 0:
+        return False
+    classes = np.unique(y_true.astype(int))
+    return classes.size >= 2
+
+
+def threshold_youden_j(y_true, y_prob, *, default: float = 0.5) -> float:
     """Umbral que maximiza el indice J de Youden (sensibilidad + especificidad - 1)."""
+    if not _threshold_inputs_ok(y_true, y_prob):
+        print("Advertencia: threshold_youden_j sin ambas clases; se usa default", default)
+        return float(default)
     fpr, tpr, thr = roc_curve(y_true, y_prob)
     best = int(np.argmax(tpr - fpr))
-    return float(thr[best])
+    value = float(thr[best])
+    if not np.isfinite(value):
+        return float(default)
+    return value
 
 
-def threshold_best_f1(y_true, y_prob) -> float:
+def threshold_best_f1(y_true, y_prob, *, default: float = 0.5) -> float:
     """Umbral que maximiza F1 sobre la clase positiva."""
+    if not _threshold_inputs_ok(y_true, y_prob):
+        print("Advertencia: threshold_best_f1 sin ambas clases; se usa default", default)
+        return float(default)
     precision, recall, thr = precision_recall_curve(y_true, y_prob)
     f1 = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-12)
+    if f1.size == 0:
+        return float(default)
     best = int(np.argmax(f1))
-    return float(thr[best])
+    value = float(thr[best])
+    if not np.isfinite(value):
+        return float(default)
+    return value
 
 
-def threshold_recall_target(y_true, y_prob, target_recall: float = 0.90) -> float:
+def threshold_recall_target(y_true, y_prob, target_recall: float = 0.90, *, default: float = 0.5) -> float:
     """Umbral mas alto (mayor precision) que aun garantiza recall >= target_recall."""
+    if not _threshold_inputs_ok(y_true, y_prob):
+        print(
+            "Advertencia: threshold_recall_target sin ambas clases; se usa default",
+            default,
+        )
+        return float(default)
     precision, recall, thr = precision_recall_curve(y_true, y_prob)
     recall_t, precision_t = recall[:-1], precision[:-1]
     ok = np.flatnonzero(recall_t >= target_recall)
     if ok.size == 0:
-        return threshold_best_f1(y_true, y_prob)
+        return threshold_best_f1(y_true, y_prob, default=default)
     best = int(ok[np.argmax(precision_t[ok])])
-    return float(thr[best])
+    value = float(thr[best])
+    if not np.isfinite(value):
+        return float(default)
+    return value
 
 
 def warmup(model, train_ds) -> float:
     """Un paso forward-only para compilar el grafo antes de model.fit() (sin actualizar pesos)."""
     t0 = time.perf_counter()
-    xb, _ = next(iter(as_tf_dataset(train_ds)))
+    try:
+        xb, _ = next(iter(as_tf_dataset(train_ds)))
+    except StopIteration as exc:
+        raise ValueError("warmup: el dataset de train no produjo batches") from exc
     model.model.predict_on_batch(xb)
     elapsed = time.perf_counter() - t0
     print(f"  Warm-up completado en {elapsed:.1f}s")
@@ -795,6 +881,13 @@ def run_training_stage(
         raise ValueError(f"stage invalido: {stage!r} (esperado 1, 2 o 3)")
     epochs = config["TRAINING"][_STAGE_EPOCH_KEYS[stage]]
 
+    # El setup de freeze/unfreeze corre aunque se omita el fit, para no saltar fases.
+    setup_seconds = 0.0
+    if setup_fn is not None:
+        t0 = time.perf_counter()
+        setup_fn()
+        setup_seconds = time.perf_counter() - t0
+
     if epochs <= 0:
         empty_history = keras.callbacks.History()
         empty_history.history = {}
@@ -802,12 +895,6 @@ def run_training_stage(
         return empty_history, None, None
 
     training_timer.start_stage(stage)
-
-    setup_seconds = 0.0
-    if setup_fn is not None:
-        t0 = time.perf_counter()
-        setup_fn()
-        setup_seconds = time.perf_counter() - t0
 
     warmup_seconds = warmup(model, train_ds)
 
@@ -824,6 +911,7 @@ def run_training_stage(
         epochs=epochs,
         callbacks=callbacks,
         training_timer=training_timer,
+        stage=stage,
     )
     fit_seconds = time.perf_counter() - fit_t0
 

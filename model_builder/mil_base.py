@@ -9,7 +9,13 @@ class MilModelBuilderBase(BaseModelBuilder):
     def __init__(self, *args, bag_size=None, attention_dim=128, attention_gated=True, bag_grid=(3, 3), bag_keras_tiling=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.bag_grid = (int(bag_grid[0]), int(bag_grid[1]))
-        self.bag_size = int(bag_size) if bag_size is not None else self.bag_grid[0] * self.bag_grid[1]
+        expected_bag_size = self.bag_grid[0] * self.bag_grid[1]
+        if bag_size is not None and int(bag_size) != expected_bag_size:
+            raise ValueError(
+                f"bag_size={bag_size} no coincide con bag_grid={self.bag_grid} "
+                f"(esperado {expected_bag_size})"
+            )
+        self.bag_size = expected_bag_size
         self.attention_dim = attention_dim
         self.attention_gated = attention_gated
         self.bag_keras_tiling = bag_keras_tiling

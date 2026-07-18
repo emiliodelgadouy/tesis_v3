@@ -1,7 +1,7 @@
 from src.modes import is_mil_mode, normalize_mode
 from src.model_builder.abmil import AbmilModelBuilder, AbmilPatchHardnegModelBuilder
 from src.model_builder.full import FullModelBuilder
-from src.model_builder.patch import PatchModelBuilder
+from src.model_builder.patch import PatchHardnegModelBuilder, PatchModelBuilder
 from src.model_builder.simple import SimpleModelBuilder
 
 _BUILDERS = {
@@ -10,7 +10,7 @@ _BUILDERS = {
     "abmil": AbmilModelBuilder,
     "abmil_patch_hardneg": AbmilPatchHardnegModelBuilder,
     "patch": PatchModelBuilder,
-    "patch_hardneg": PatchModelBuilder,
+    "patch_hardneg": PatchHardnegModelBuilder,
 }
 
 

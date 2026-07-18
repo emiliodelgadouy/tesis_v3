@@ -1,4 +1,4 @@
-"""Modos de entrenamiento: SIMPLE | ABMIL | FULL | PATCH."""
+"""Modos de entrenamiento: simple, full, patch, patch_hardneg, abmil, abmil_patch_hardneg."""
 
 from __future__ import annotations
 
@@ -42,17 +42,11 @@ def resolve_training_mode(
 ) -> str:
     """Unifica MODE con parametros legacy (mil_mode, architecture_name, bag_mode).
 
-    Si ``mode`` es distinto de ``simple``, tiene prioridad sobre los aliases legacy.
+    Si ``mode`` esta seteado, siempre gana; los aliases legacy solo aplican si
+    ``mode is None``.
     """
-    has_legacy = (
-        mil_mode is not None
-        or architecture_name is not None
-        or bag_mode is not None
-    )
     if mode is not None:
-        normalized = normalize_mode(mode)
-        if not has_legacy or normalized != "simple":
-            return normalized
+        return normalize_mode(mode)
 
     if mil_mode is False:
         return "simple"

@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 import re
 
 import tensorflow as tf
@@ -14,13 +15,22 @@ def _sanitize_checkpoint_prefix(name: str) -> str:
     return slug.strip("_") or "run"
 
 
+def _is_finite_number(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 class BaseModelBuilder:
     model_name = "model"
 
     def __init__(self, IMG_SIZE, backbone, preprocess_input, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, focal_alpha=0.90, focal_gamma=2.0, metric_to_maximize="pr_auc", checkpoint_monitor=None, monitor_mode="max", early_stopping_patience=8, reduce_lr_patience=4, reduce_lr_factor=0.5, min_lr=1e-7, aggressive_augmentation=False, initial_bias=None, pretrained_builder=None, jit_compile=True, steps_per_execution=32, checkpoint_prefix=None, lateralized_inputs=False):
         self.pretrained_builder = pretrained_builder
         if pretrained_builder is not None:
-            pretrained_builder.load_best_global_checkpoint()
+            # Evita recargar si el caller (p.ej. experiment) ya cargo el mejor global.
+            if not getattr(pretrained_builder, "_global_checkpoint_loaded", False):
+                pretrained_builder.load_best_global_checkpoint()
             IMG_SIZE = pretrained_builder.IMG_SIZE
             backbone = pretrained_builder.backbone
             preprocess_input = pretrained_builder.preprocess_input
@@ -28,7 +38,6 @@ class BaseModelBuilder:
         self.backbone = backbone
         self.preprocess_input = preprocess_input
         self.backbone.trainable = backbone_trainable
-        self.input_shape = backbone.input_shape[1:3]
         self.aggressive_augmentation = aggressive_augmentation
         self.top_dense = top_dense
         self.dropout = dropout
@@ -49,6 +58,7 @@ class BaseModelBuilder:
         self.checkpoint_path = self.checkpoint_dir / "best_checkpoint.weights.h5"
         self.fit_number = 0
         self.best_checkpoints = []
+        self._global_checkpoint_loaded = False
         self.initial_bias = initial_bias
         self.jit_compile = jit_compile
         self.steps_per_execution = steps_per_execution
@@ -187,11 +197,13 @@ class BaseModelBuilder:
         stem = path.name.removesuffix(".weights.h5")
         return path.parent.glob(f"{stem}_epoch*.weights.h5")
 
-    def checkpoint_info(self, checkpoint_path):
-        return int(Path(checkpoint_path).name.rsplit("_epoch", 1)[1].removesuffix(".weights.h5"))
-
     def monitor_improved(self, current, best):
-        return best is None or (current < best if self.monitor_mode == "min" else current > best)
+        # NaN/Inf nunca mejoran; un best no finito se reemplaza por el primer valor finito.
+        if not _is_finite_number(current):
+            return False
+        if best is None or not _is_finite_number(best):
+            return True
+        return current < best if self.monitor_mode == "min" else current > best
 
     def checkpoint_callback(self):
         # guarda pesos cuando mejora la metrica monitoreada
@@ -200,6 +212,10 @@ class BaseModelBuilder:
         best_value = {monitor: None}
 
         def on_epoch_end(epoch, logs):
+            logs = logs or {}
+            if monitor not in logs:
+                print(f"\nEpoch {epoch + 1}: {monitor} ausente en logs; se omite checkpoint")
+                return
             current = float(logs[monitor])
             if not self.monitor_improved(current, best_value[monitor]):
                 return
@@ -231,9 +247,13 @@ class BaseModelBuilder:
             MemoryEpochLogger(),
         ]
 
-    def fit(self, train_ds, val_ds, epochs=5, callbacks=None, training_timer=None):
-        # entrena una etapa (frozen / partial / full) y trackea checkpoints por stage
-        self.fit_number += 1
+    def fit(self, train_ds, val_ds, epochs=5, callbacks=None, training_timer=None, stage=None):
+        # entrena una etapa (frozen / partial / full) y trackea checkpoints por stage.
+        # ``stage`` explicito alinea nombres on-disk con Comet aunque se omitan etapas.
+        if stage is not None:
+            self.fit_number = int(stage)
+        else:
+            self.fit_number += 1
         stage_stem = (
             f"{self.checkpoint_prefix}_stage_{self.fit_number}"
             if self.checkpoint_prefix
@@ -243,16 +263,30 @@ class BaseModelBuilder:
         return self.model.fit(as_tf_dataset(train_ds), validation_data=as_tf_dataset(val_ds), epochs=epochs, callbacks=self.callbacks(training_timer=training_timer) + list(callbacks or []))
 
     def load_best_checkpoint(self):
-        # carga el mejor checkpoint de la etapa actual
-        info = next(info for info in self.best_checkpoints if info["stage"] == self.fit_number)
+        # carga el mejor checkpoint de la etapa actual; si no hay, conserva pesos en memoria.
+        info = next((item for item in self.best_checkpoints if item["stage"] == self.fit_number), None)
+        if info is None:
+            print(
+                f"Advertencia: no hay checkpoint para stage {self.fit_number}; "
+                "se mantienen los pesos actuales del modelo"
+            )
+            return None
         self.model.load_weights(str(info["path"]))
         return info["epoch"]
 
     def load_best_global_checkpoint(self):
         # carga el mejor checkpoint de toda la corrida (entre stages)
+        if not self.best_checkpoints:
+            raise RuntimeError(
+                "No hay checkpoints guardados para cargar "
+                f"(model_name={self.model_name!r}, prefix={self.checkpoint_prefix!r})"
+            )
+        finite = [item for item in self.best_checkpoints if _is_finite_number(item.get("value"))]
+        pool = finite or self.best_checkpoints
         pick = min if self.monitor_mode == "min" else max
-        info = pick(self.best_checkpoints, key=lambda i: i["value"])
+        info = pick(pool, key=lambda i: i["value"])
         self.model.load_weights(str(info["path"]))
+        self._global_checkpoint_loaded = True
         return info
 
     def evaluate(self, test_ds, return_dict=True):

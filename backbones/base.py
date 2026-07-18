@@ -54,7 +54,13 @@ class ImagenetBackbone(Backbone):
 
 
 def get_backbone(name: str) -> Backbone:
-    return _REGISTRY[name]
+    try:
+        return _REGISTRY[name]
+    except KeyError as exc:
+        available = ", ".join(sorted(_REGISTRY))
+        raise ValueError(
+            f"Backbone {name!r} no disponible. Opciones: {available}"
+        ) from exc
 
 
 def resolve_backbone(name: str, input_size: InputSize | None = None) -> tuple[keras.Model, PreprocessFunction, InputSize]:

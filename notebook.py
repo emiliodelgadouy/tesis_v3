@@ -111,10 +111,7 @@ def configure_notebook(
     mixed_precision_policy: str | None = "mixed_float16",
     install_comet: bool = True,
 ) -> None:
-    if install_comet:
-        _install_comet_if_missing()
-    _ensure_comet()
-
+    running_in_colab = is_running_in_colab()
     os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
     os.environ.setdefault("TF_GPU_ALLOCATOR", "cuda_malloc_async")
     os.environ.setdefault("TF_CUDNN_USE_AUTOTUNE", "1")
@@ -123,17 +120,20 @@ def configure_notebook(
     if disable_bytecode:
         sys.dont_write_bytecode = True
 
+    # Instalar antes de importar Comet/TensorFlow: actualizar el entorno despues
+    # de cargar TensorFlow deja esta sesion usando las versiones anteriores.
+    if install_requirements and not (running_in_colab and skip_requirements_in_colab):
+        install_requirements_silent(requirements_path)
+    importlib.invalidate_caches()
+
+    if install_comet:
+        _install_comet_if_missing()
+    _ensure_comet()
+
     if mixed_precision_policy is not None:
         from tensorflow.keras import mixed_precision
 
         mixed_precision.set_global_policy(mixed_precision_policy)
-
-    running_in_colab = is_running_in_colab()
-
-    if install_requirements and not (running_in_colab and skip_requirements_in_colab):
-        install_requirements_silent(requirements_path)
-
-    importlib.invalidate_caches()
 
     if not autoreload:
         return

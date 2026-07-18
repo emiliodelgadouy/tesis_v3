@@ -485,16 +485,19 @@ def _collect_batches(
             images, labels = batch
         images_batches.append(np.asarray(images))
         labels_batches.append(np.asarray(labels).reshape(-1))
-    if with_crop_meta:
-        return (
-            images_batches,
-            labels_batches,
-            np.concatenate(y0_batches),
-            np.concatenate(x0_batches),
-            np.concatenate(h_batches),
-            np.concatenate(w_batches),
-        )
-    return images_batches, labels_batches
+        if with_crop_meta:
+            if not images_batches:
+                empty = np.asarray([], dtype=np.float32)
+                return [], [], empty, empty, empty, empty
+            return (
+                images_batches,
+                labels_batches,
+                np.concatenate(y0_batches),
+                np.concatenate(x0_batches),
+                np.concatenate(h_batches),
+                np.concatenate(w_batches),
+            )
+        return images_batches, labels_batches
 
 
 def _label_counts(labels: np.ndarray) -> dict[str, int]:
@@ -827,7 +830,7 @@ def positive_only_mixup_batch(
 
     out_images = (1.0 - mix_gate) * images_f32 + mix_gate * mixed_images
     out_labels = (1.0 - mix_gate) * labels_f32 + mix_gate * mixed_labels
-    return out_images, out_labels
+    return tf.cast(out_images, images.dtype), out_labels
 
 
 def _dataset_deterministic_options(ds: tf.data.Dataset) -> tf.data.Dataset:
@@ -882,7 +885,8 @@ class TfDatasetConfig:
     # Reescala la imagen al canvas del bag (rows*ph x cols*pw) antes de recortar,
     # para que el parche vea la misma escala que los tiles de ABMIL, pero muestreando
     # libremente con las estrategias roi/avoid_roi (sin fijar a la grilla).
-    patch_resize_to_bag_canvas: bool = False
+    # Default alineado con el notebook (MIL.PATCH_RESIZE_TO_BAG_CANVAS).
+    patch_resize_to_bag_canvas: bool = True
     return_crop_offset: bool = False
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
@@ -900,10 +904,19 @@ class TfDatasetConfig:
             return False
         if self.patch_align_to_bag_grid:
             return True
-        if self.patch_crop_strategy in ("roi", "avoid_roi"):
-            return True
+        # Strategy global explicita: solo exige ROI si esa strategy la usa.
+        if self.patch_crop_strategy is not None:
+            return self.patch_crop_strategy in ("roi", "avoid_roi")
         by_label = self.patch_crop_by_label or DEFAULT_PATCH_CROP_BY_LABEL
         return by_label.get(1.0) == "roi" or by_label.get(0.0) == "avoid_roi"
+
+    def __post_init__(self) -> None:
+        self.image_size = _normalize_size(self.image_size)
+        self.bag_grid = (int(self.bag_grid[0]), int(self.bag_grid[1]))
+        self.mode = normalize_mode(self.mode)
+        self.patch_mode = is_patch_mode(self.mode)
+        if self.bag_canvas_mode not in ("resize", "pad"):
+            raise ValueError("bag_canvas_mode debe ser 'resize' o 'pad'")
 
 
 @dataclass
@@ -939,7 +952,7 @@ class DatasetProviderConfig:
     patch_roi_sigma_frac: float = 0.1
     patch_avoid_roi_max_attempts: int = 64
     patch_align_to_bag_grid: bool = False
-    patch_resize_to_bag_canvas: bool = False
+    patch_resize_to_bag_canvas: bool = True
     return_crop_offset: bool = False
     positive_mixup: bool = False
     positive_mixup_alpha: float = 0.1
@@ -953,10 +966,10 @@ class DatasetProviderConfig:
         self.image_size = _normalize_size(self.image_size)
         self.bag_grid = (int(self.bag_grid[0]), int(self.bag_grid[1]))
         self.mode = normalize_mode(self.mode)
+        # Sincroniza siempre: evita patch_mode sticky tras with_overrides(mode=...).
+        self.patch_mode = is_patch_mode(self.mode)
         if self.bag_canvas_mode not in ("resize", "pad"):
             raise ValueError("bag_canvas_mode debe ser 'resize' o 'pad'")
-        if is_patch_mode(self.mode):
-            self.patch_mode = True
 
     def with_overrides(self, **kwargs: Any) -> DatasetProviderConfig:
         return replace(self, **kwargs)
@@ -1067,8 +1080,14 @@ def hard_negatives_from_positives(
     *,
     label_column: str = "cls",
 ) -> pd.DataFrame:
-    """Mismas imagenes con hallazgo, etiqueta 0 y parches aleatorios (hard negatives)."""
-    hard = pos_df.copy()
+    """Filas positivas reetiquetadas a 0 para muestrear hard negatives.
+
+    Solo cambia la etiqueta. El crop fuera de ROI depende del provider
+    (``patch_crop_by_label[0]=avoid_roi`` por defecto, o
+    ``patch_align_to_bag_grid``). Un ``patch_crop_strategy="roi"`` global
+    anularia esa semantica.
+    """
+    hard = pos_df[pos_df[label_column] >= 0.5].copy()
     hard[label_column] = 0.0
     return hard
 
@@ -1220,6 +1239,11 @@ class InspectDataset:
         dpi: float = 100.0,
         title: str | None = None,
     ) -> None:
+        if show_roi and is_mil_mode(self.config.mode):
+            # En MIL cada muestra es un bag troceado (o el canvas completo); el
+            # overlay de ROI por parche no aplica. Degradamos en vez de romper.
+            print(f"show_roi ignorado en {self.name!r}: no soportado en modo MIL (bags).")
+            show_roi = False
         if show_roi and self.source_table is None:
             raise ValueError(
                 f"show_roi en {self.name!r} requiere tabla fuente; "
@@ -1323,6 +1347,10 @@ def as_tf_dataset(dataset: tf.data.Dataset | InspectDataset) -> tf.data.Dataset:
     """Keras solo acepta `tf.data.Dataset`; desenvuelve `InspectDataset` si hace falta."""
     if isinstance(dataset, InspectDataset):
         return dataset.unwrap()
+    if isinstance(dataset, DatasetSplits):
+        raise TypeError(
+            "as_tf_dataset recibio DatasetSplits; pasa splits.train / .val / .test"
+        )
     return dataset
 
 
@@ -1454,6 +1482,7 @@ class DatasetProvider:
         if strategy == "roi":
             return self._extract_patch_roi(
                 img,
+                path,
                 roi_xmin,
                 roi_ymin,
                 roi_xmax,
@@ -1533,6 +1562,7 @@ class DatasetProvider:
     def _extract_patch_roi(
         self,
         img: tf.Tensor,
+        path: tf.Tensor,
         roi_xmin: tf.Tensor,
         roi_ymin: tf.Tensor,
         roi_xmax: tf.Tensor,
@@ -1544,28 +1574,39 @@ class DatasetProvider:
         ph: int,
         pw: int,
     ) -> tuple[tf.Tensor, tf.Tensor]:
-        h0 = tf.cast(tf.shape(img)[0], tf.float32)
-        w0 = tf.cast(tf.shape(img)[1], tf.float32)
-        xmin = roi_xmin * w0
-        ymin = roi_ymin * h0
-        xmax = roi_xmax * w0
-        ymax = roi_ymax * h0
-        cx = (xmin + xmax) / 2.0
-        cy = (ymin + ymax) / 2.0
-        return (
-            _offset_from_center(
-                cy,
-                ph,
-                max_y,
-                random_jitter=random_patch,
-                sigma_frac=self.config.patch_roi_sigma_frac,
-            ),
-            _offset_from_center(
-                cx,
-                pw,
-                max_x,
-                random_jitter=random_patch,
-                sigma_frac=self.config.patch_roi_sigma_frac,
+        valid = _roi_is_valid(roi_xmin, roi_ymin, roi_xmax, roi_ymax)
+
+        def _sample_roi() -> tuple[tf.Tensor, tf.Tensor]:
+            h0 = tf.cast(tf.shape(img)[0], tf.float32)
+            w0 = tf.cast(tf.shape(img)[1], tf.float32)
+            xmin = roi_xmin * w0
+            ymin = roi_ymin * h0
+            xmax = roi_xmax * w0
+            ymax = roi_ymax * h0
+            cx = (xmin + xmax) / 2.0
+            cy = (ymin + ymax) / 2.0
+            return (
+                _offset_from_center(
+                    cy,
+                    ph,
+                    max_y,
+                    random_jitter=random_patch,
+                    sigma_frac=self.config.patch_roi_sigma_frac,
+                ),
+                _offset_from_center(
+                    cx,
+                    pw,
+                    max_x,
+                    random_jitter=random_patch,
+                    sigma_frac=self.config.patch_roi_sigma_frac,
+                ),
+            )
+
+        return tf.cond(
+            valid,
+            _sample_roi,
+            lambda: self._uniform_patch_offsets_branch(
+                img, path, random_patch=random_patch, max_y=max_y, max_x=max_x
             ),
         )
 
@@ -1745,6 +1786,7 @@ class DatasetProvider:
         elif strategy == "roi":
             y0, x0 = self._extract_patch_roi(
                 img,
+                path,
                 roi_xmin,
                 roi_ymin,
                 roi_xmax,
@@ -1783,7 +1825,7 @@ class DatasetProvider:
 
             def _positive_offsets() -> tuple[tf.Tensor, tf.Tensor]:
                 return self._offsets_for_label_strategy(
-                    by_label[1.0],
+                    by_label.get(1.0, "uniform"),
                     img,
                     path,
                     label,
@@ -1800,7 +1842,7 @@ class DatasetProvider:
 
             def _negative_offsets() -> tuple[tf.Tensor, tf.Tensor]:
                 return self._offsets_for_label_strategy(
-                    by_label[0.0],
+                    by_label.get(0.0, "uniform"),
                     img,
                     path,
                     label,
@@ -2034,6 +2076,8 @@ class DatasetProvider:
         random_patch: bool | None = None,
         name: str = "dataset",
     ) -> InspectDataset:
+        if len(tbl) == 0:
+            raise ValueError(f"No se puede construir el dataset {name!r}: tabla vacia")
         if random_patch is None:
             random_patch = shuffle
 
@@ -2084,29 +2128,19 @@ class DatasetProvider:
             batched = ordered_batched
 
         if shuffle and self.config.positive_mixup:
-            alpha = float(self.config.positive_mixup_alpha)
-            probability = float(self.config.positive_mixup_probability)
-
             if self.config.return_crop_offset:
-
-                def _mixup_map_with_crop(
-                    images: tf.Tensor,
-                    labels: tf.Tensor,
-                    y0: tf.Tensor,
-                    x0: tf.Tensor,
-                    crop_h: tf.Tensor,
-                    crop_w: tf.Tensor,
-                ) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
-                    images, labels = positive_only_mixup_batch(
-                        images,
-                        labels,
-                        alpha=alpha,
-                        probability=probability,
-                    )
-                    return images, labels, y0, x0, crop_h, crop_w
-
-                mixup_fn = _mixup_map_with_crop
+                # Mixup mezclaria imagenes/labels pero no los offsets; se omite.
+                print(
+                    f"Advertencia: positive_mixup omitido en {name!r} "
+                    "porque return_crop_offset=True"
+                )
             else:
+                alpha = float(self.config.positive_mixup_alpha)
+                if alpha <= 0:
+                    raise ValueError(
+                        f"positive_mixup_alpha debe ser > 0; recibido {alpha!r}"
+                    )
+                probability = float(self.config.positive_mixup_probability)
 
                 def _mixup_map(images: tf.Tensor, labels: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
                     return positive_only_mixup_batch(
@@ -2116,10 +2150,8 @@ class DatasetProvider:
                         probability=probability,
                     )
 
-                mixup_fn = _mixup_map
-
-            batched = batched.map(mixup_fn, num_parallel_calls=tf.data.AUTOTUNE)
-            batched = _dataset_perf_options(batched.prefetch(tf.data.AUTOTUNE))
+                batched = batched.map(_mixup_map, num_parallel_calls=tf.data.AUTOTUNE)
+                batched = _dataset_perf_options(batched.prefetch(tf.data.AUTOTUNE))
 
         return self._wrap(
             batched,
