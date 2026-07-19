@@ -57,3 +57,14 @@ class AbmilPatchHardnegGuidedModelBuilder(AbmilPatchHardnegModelBuilder):
             guide_strength=self.guided_attention_strength,
             name="guided_attention_pooling",
         )(inputs)
+
+    def _unfreeze_transferred_patch_layers(self):
+        """Keep the pretrained patch guide fixed during MIL fine-tuning.
+
+        The guide is the only spatial supervision available to this mode.  If
+        it is unfrozen in stage 2, the bag loss can rewrite the patch logits
+        and silently erase the localization prior we measured beforehand.
+        The MIL backbone/attention layers remain trainable through the normal
+        stage transition.
+        """
+        return None
