@@ -1,5 +1,5 @@
 from .base import Backbone, DEFAULT_WEIGHTS
-from . import chexnet, custom_cnn, custom_tiny, efficientnet, efficientnet_v2, radimagenet, vgg
+from . import chexnet, custom_cnn, custom_tiny, efficientnet, efficientnet_v2, radimagenet, vgg, vit
 from .base import BACKBONES, get_backbone, resolve_backbone
 from .chexnet import CheXNetBackbone
 from .custom_cnn import CustomCnnBackbone
@@ -31,6 +31,7 @@ from .radimagenet import (
     RadImageNetResNet50Backbone,
 )
 from .vgg import VGG16Backbone, VGG19Backbone
+from .vit import ViTB16Backbone, ViTB32Backbone, ViTL16Backbone
 
 __all__ = [
     "BACKBONES",
@@ -61,6 +62,9 @@ __all__ = [
     "RadImageNetResNet50Backbone",
     "VGG16Backbone",
     "VGG19Backbone",
+    "ViTB16Backbone",
+    "ViTB32Backbone",
+    "ViTL16Backbone",
     "get_backbone",
     "resolve_backbone",
 ]
