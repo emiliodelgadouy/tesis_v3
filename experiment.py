@@ -16,7 +16,7 @@ from src.comet_logging import (
     start_training_experiment,
 )
 from src.dataset_provider import build_dataset_provider
-from src.modes import normalize_mode
+from src.modes import is_mil_mode, normalize_mode
 from src.model_builder import ModelBuilder
 from src.utils import (
     TrainingTimer,
@@ -43,6 +43,7 @@ def run_training_experiment(
     *,
     pretrained_builder=None,
     return_builder=False,
+    dispose_pretrained_builder=True,
 ):
     mode = normalize_mode(mode)
     general = config["GENERAL"]
@@ -83,12 +84,12 @@ def run_training_experiment(
     release_gpu_memory(clear_keras_session=pretrained_builder is None)
 
     exp_name = f"{mode}_{backbone_name}"
-    is_mil_run = mode in ("abmil", "abmil_patch_hardneg")
+    is_mil_run = is_mil_mode(mode)
     batch_size = mil["BATCH_SIZE"] if is_mil_run else general["BATCH_SIZE"]
     # Default: cache on en simple/patch; off en full/abmil (canvases grandes, >100 GB posibles).
     cache_dataset = general.get(
         "CACHE_DATASET",
-        mode not in ("abmil", "abmil_patch_hardneg", "full"),
+        not is_mil_run and mode != "full",
     )
 
     # Modos PATCH: se remuestrea train (pos + hard/random neg) segun el ratio de la config,
@@ -155,7 +156,7 @@ def run_training_experiment(
             if patch_align_to_bag_grid or patch_resize_to_bag_canvas:
                 run_config["BAG_GRID"] = list(bag_grid)
                 run_config["BAG_CANVAS_MODE"] = bag_canvas_mode
-        if mode in ("abmil", "abmil_patch_hardneg"):
+        if is_mil_run:
             run_config["BAG_GRID"] = list(bag_grid)
             run_config["BAG_KERAS_TILING"] = bag_keras_tiling
             run_config["BAG_CANVAS_MODE"] = bag_canvas_mode
@@ -167,6 +168,10 @@ def run_training_experiment(
             run_config["ATTENTION_DIM"] = attention_dim
             run_config["ATTENTION_GATED"] = attention_gated
             run_config["BAG_SIZE"] = bag_grid[0] * bag_grid[1]
+            if mode == "abmil_patch_hardneg_guided":
+                run_config["GUIDED_ATTENTION_SOURCE"] = "patch_hardneg_instance_logits"
+                run_config["GUIDED_ATTENTION_TEMPERATURE"] = mil.get("GUIDED_ATTENTION_TEMPERATURE", 1.0)
+                run_config["GUIDED_ATTENTION_STRENGTH"] = mil.get("GUIDED_ATTENTION_STRENGTH", 1.0)
         if pretrained_builder is not None:
             pretrain_best = pretrained_builder.load_best_global_checkpoint()
             pretraining_mode = getattr(
@@ -174,7 +179,10 @@ def run_training_experiment(
             )
             run_config["PRETRAINED_FROM"] = f"{pretraining_mode}_{backbone_name}"
             run_config["PRETRAINED_BEST_VAL_METRIC"] = pretrain_best["value"]
-            run_config["PRETRAINED_FROZEN_STAGE1"] = ["backbone", "dense", "output"]
+            run_config["PRETRAINED_FROZEN_STAGE1"] = ["backbone", "dense"]
+            if mode == "abmil_patch_hardneg_guided":
+                run_config["PRETRAINED_FROZEN_STAGE1"].append("instance_output")
+            run_config["BAG_OUTPUT_INITIALIZATION"] = "new"
 
         steps_per_execution = resolve_steps_per_execution(
             len(train_df),
@@ -330,9 +338,12 @@ def run_training_experiment(
         raise
     finally:
         keep_builder = return_builder and result_builder is not None
+        keep_pretrained_builder = pretrained_builder is not None and not dispose_pretrained_builder
         del dataset_provider, train_ds, val_ds, ds_test
 
-        if keep_builder:
+        if keep_builder or keep_pretrained_builder:
+            if not keep_builder:
+                del model, builder, backbone
             release_gpu_memory(clear_keras_session=False)
         else:
             del model, builder, backbone

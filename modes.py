@@ -1,14 +1,34 @@
-"""Modos de entrenamiento: simple, full, patch, patch_hardneg, abmil, abmil_patch_hardneg."""
+"""Modos de entrenamiento disponibles para los experimentos."""
 
 from __future__ import annotations
 
-TRAINING_MODES = ("simple", "abmil", "abmil_patch_hardneg", "full", "patch", "patch_hardneg")
+TRAINING_MODES = (
+    "simple",
+    "abmil",
+    "abmil_patch_hardneg",
+    "abmil_patch_hardneg_guided",
+    "full",
+    "patch",
+    "patch_hardneg",
+)
+
+MIL_MODES = (
+    "abmil",
+    "abmil_patch_hardneg",
+    "abmil_patch_hardneg_guided",
+)
+
+PATCH_PRETRAINED_MIL_MODES = (
+    "abmil_patch_hardneg",
+    "abmil_patch_hardneg_guided",
+)
 
 # Clave sin guiones ni underscores (ver normalize_mode).
 _NORMALIZED_TO_MODE = {
     "simple": "simple",
     "abmil": "abmil",
     "abmilpatchhardneg": "abmil_patch_hardneg",
+    "abmilpatchhardnegguided": "abmil_patch_hardneg_guided",
     "full": "full",
     "patch": "patch",
     "patchhardneg": "patch_hardneg",
@@ -26,7 +46,11 @@ def normalize_mode(name: str) -> str:
 
 
 def is_mil_mode(mode: str) -> bool:
-    return normalize_mode(mode) in ("abmil", "abmil_patch_hardneg")
+    return normalize_mode(mode) in MIL_MODES
+
+
+def uses_patch_pretraining(mode: str) -> bool:
+    return normalize_mode(mode) in PATCH_PRETRAINED_MIL_MODES
 
 
 def is_patch_mode(mode: str) -> bool:

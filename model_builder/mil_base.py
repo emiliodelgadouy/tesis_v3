@@ -45,24 +45,32 @@ class MilModelBuilderBase(BaseModelBuilder):
         h, w = self.IMG_SIZE
         return keras.Input(shape=(rows * h, cols * w, 3), name="bag_full_image")
 
-    def encode_instances(self, inputs):
-        # corre backbone en cada instancia del bag con TimeDistributed
+    def encode_instance_features(self, inputs):
+        """Codifica cada instancia sin aplicar dropout."""
         x = layers.TimeDistributed(self.augmentation_seq(), name="td_augmentation")(inputs)
         x = layers.TimeDistributed(layers.Lambda(self.preprocess_input, name="preprocess_input"), name="td_preprocess")(x)
         x = layers.TimeDistributed(self.backbone, name="td_backbone")(x)
         x = layers.TimeDistributed(layers.GlobalAveragePooling2D(name="gap"), name="td_gap")(x)
-        x = layers.TimeDistributed(layers.Dense(self.top_dense, activation="relu", name="instance_dense"), name="td_instance_dense")(x)
-        return layers.TimeDistributed(layers.Dropout(self.dropout, name="instance_dropout"), name="td_instance_dropout")(x)
+        return layers.TimeDistributed(layers.Dense(self.top_dense, activation="relu", name="instance_dense"), name="td_instance_dense")(x)
 
-    def encode_instances_keras_tiling(self, inputs):
-        # augment/preprocess en imagen entera y despues tilea con BagTiling
+    def encode_instance_features_keras_tiling(self, inputs):
+        """Augmenta la imagen completa, genera tiles y devuelve sus embeddings."""
         x = self.augmentation(inputs)
         x = self.preprocess(x)
         x = BagTiling(self.bag_grid, name="bag_tiling")(x)
         x = layers.TimeDistributed(self.backbone, name="td_backbone")(x)
         x = layers.TimeDistributed(layers.GlobalAveragePooling2D(name="gap"), name="td_gap")(x)
-        x = layers.TimeDistributed(layers.Dense(self.top_dense, activation="relu", name="instance_dense"), name="td_instance_dense")(x)
+        return layers.TimeDistributed(layers.Dense(self.top_dense, activation="relu", name="instance_dense"), name="td_instance_dense")(x)
+
+    def instance_dropout(self, x):
         return layers.TimeDistributed(layers.Dropout(self.dropout, name="instance_dropout"), name="td_instance_dropout")(x)
+
+    def encode_instances(self, inputs):
+        # corre backbone en cada instancia del bag con TimeDistributed
+        return self.instance_dropout(self.encode_instance_features(inputs))
+
+    def encode_instances_keras_tiling(self, inputs):
+        return self.instance_dropout(self.encode_instance_features_keras_tiling(inputs))
 
     def bag_dropout(self, x):
         return layers.Dropout(self.dropout, dtype="float32", name="bag_dropout")(x)
@@ -91,8 +99,18 @@ class MilModelBuilderBase(BaseModelBuilder):
         self.model = self.wrap_model(inputs, outputs)
         return self.compile()
 
+    def _target_instance_output(self):
+        """Devuelve la cabeza patch por instancia cuando el modo la define."""
+        if self.model is None:
+            return None
+        try:
+            return self.model.get_layer("td_instance_output").layer
+        except ValueError:
+            return None
+
     def _transfer_pretrained_patch_layers(self) -> None:
-        # El backbone ya se comparte; copiamos proyeccion y clasificador de instancia.
+        # El backbone ya se comparte. La cabeza final de bag siempre queda nueva:
+        # un clasificador de instancia y uno de bag no tienen la misma semantica.
         source = self.pretrained_builder
         if source is None:
             return
@@ -100,21 +118,31 @@ class MilModelBuilderBase(BaseModelBuilder):
             raise RuntimeError("No se puede transferir el encoder patch: modelo fuente/destino ausente")
         try:
             dense_weights = source.model.get_layer("dense").get_weights()
-            output_weights = source.model.get_layer("output").get_weights()
             target_dense = self.model.get_layer("td_instance_dense").layer
-            target_output = self.model.get_layer("output")
         except ValueError as exc:
-            raise RuntimeError("No se encontraron la proyeccion/clasificador del modelo patch") from exc
+            raise RuntimeError("No se encontro la proyeccion densa del modelo patch") from exc
         target_dense.set_weights(dense_weights)
-        target_output.set_weights(output_weights)
         target_dense.trainable = False
-        target_output.trainable = False
-        print("Modelo patch transferido: backbone + dense + output congelados para etapa 1")
+        frozen = ["backbone", "dense"]
+
+        target_instance_output = self._target_instance_output()
+        if target_instance_output is not None:
+            try:
+                output_weights = source.model.get_layer("output").get_weights()
+            except ValueError as exc:
+                raise RuntimeError("No se encontro el clasificador de instancia del modelo patch") from exc
+            target_instance_output.set_weights(output_weights)
+            target_instance_output.trainable = False
+            frozen.append("instance_output")
+
+        print(f"Modelo patch transferido: {' + '.join(frozen)} congelados para etapa 1; output de bag nuevo")
 
     def _unfreeze_transferred_patch_layers(self) -> None:
         if self.pretrained_builder is not None and self.model is not None:
             self.model.get_layer("td_instance_dense").layer.trainable = True
-            self.model.get_layer("output").trainable = True
+            target_instance_output = self._target_instance_output()
+            if target_instance_output is not None:
+                target_instance_output.trainable = True
 
     def make_backbone_partially_trainable(
         self,

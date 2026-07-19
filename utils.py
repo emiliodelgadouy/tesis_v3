@@ -726,7 +726,7 @@ def release_gpu_memory(*, clear_keras_session: bool = True) -> None:
     """Libera VRAM/RAM entre experimentos.
 
     Usar ``clear_keras_session=False`` solo si un builder activo se reutiliza
-    inmediatamente después (p. ej. patch_hardneg exitoso → abmil_patch_hardneg).
+    inmediatamente después (p. ej. patch_hardneg → ABMIL transferido y guiado).
     """
     if clear_keras_session:
         tf.keras.backend.clear_session()
