@@ -43,6 +43,8 @@ def run_training_experiment(
     *,
     pretrained_builder=None,
     return_builder=False,
+    return_summary=False,
+    experiment_suffix=None,
     dispose_pretrained_builder=True,
 ):
     mode = normalize_mode(mode)
@@ -80,10 +82,12 @@ def run_training_experiment(
 
     experiment = model = builder = backbone = dataset_provider = train_ds = val_ds = (
         ds_test
-    ) = result_builder = None
+    ) = result_builder = summary = None
     release_gpu_memory(clear_keras_session=pretrained_builder is None)
 
     exp_name = f"{mode}_{backbone_name}"
+    if experiment_suffix:
+        exp_name = f"{exp_name}_{experiment_suffix}"
     is_mil_run = is_mil_mode(mode)
     batch_size = mil["BATCH_SIZE"] if is_mil_run else general["BATCH_SIZE"]
     # Default: cache on en simple/patch; off en full/abmil (canvases grandes, >100 GB posibles).
@@ -296,7 +300,7 @@ def run_training_experiment(
         )
         y_pred_youden = apply_probability_threshold(y_test_prob, thr_youden)
 
-        log_test_results(
+        comet_url = log_test_results(
             config,
             experiment,
             backbone_name=exp_name,
@@ -321,6 +325,21 @@ def run_training_experiment(
         experiment = (
             None  # ya cerrado por log_test_results; evita doble end() en finally
         )
+
+        if return_summary:
+            from sklearn.metrics import average_precision_score, roc_auc_score
+
+            summary = {
+                "experiment": exp_name,
+                "mode": mode,
+                "backbone": backbone_name,
+                "input_size": list(input_size),
+                "val_best_auc": float(best_global_checkpoint["value"]),
+                "test_roc_auc": float(roc_auc_score(y_test_true, y_test_prob)),
+                "test_pr_auc": float(average_precision_score(y_test_true, y_test_prob)),
+                "thr_youden": float(thr_youden),
+                "comet_url": comet_url,
+            }
 
         if return_builder:
             model.pretraining_mode = mode
@@ -350,4 +369,6 @@ def run_training_experiment(
             dispose_model_builder(pretrained_builder)
             release_gpu_memory(clear_keras_session=True)
 
+    if return_summary:
+        return summary
     return result_builder
