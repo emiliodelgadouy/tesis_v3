@@ -14,6 +14,7 @@ TRAINING_MODES = (
     "patch",
     "patch_hardneg",
     "patch_alltiles",
+    "multibranch",
 )
 
 MIL_MODES = (
@@ -46,6 +47,7 @@ _NORMALIZED_TO_MODE = {
     "patch": "patch",
     "patchhardneg": "patch_hardneg",
     "patchalltiles": "patch_alltiles",
+    "multibranch": "multibranch",
 }
 
 

@@ -86,6 +86,8 @@ def _export_predictions(exp_name: str, table, y_true, y_prob) -> Path:
             "patient_id",
             "image_id",
             "path",
+            "view",
+            "laterality",
             "cls",
             "_bag_cls",
             "_patch_tile_index",
@@ -128,6 +130,7 @@ def run_training_experiment(
     patch_cfg = config.get("PATCH") or {}
     patch_hardneg_cfg = config.get("PATCH_HARDNEG") or {}
     patch_alltiles_cfg = config.get("PATCH_ALLTILES") or {}
+    multibranch_cfg = config.get("MULTIBRANCH") or {}
 
     # Parametros derivados de la config (antes se pasaban sueltos por argumento):
     bag_grid = full_cfg.get("BAG_GRID", (3, 3))
@@ -146,7 +149,7 @@ def run_training_experiment(
     patch_tile_index_column = "_patch_tile_index" if mode == "patch_alltiles" else None
     # FULL = misma escala que el canvas ABMIL: BAG_GRID * tamaño nativo del backbone.
     # FULL["INPUT_SIZE"] queda como override opcional (p.ej. pruebas puntuales).
-    if mode == "full":
+    if mode in ("full", "multibranch"):
         full_override = full_cfg.get("INPUT_SIZE")
         if full_override is not None:
             input_size = tuple(full_override)
@@ -159,17 +162,22 @@ def run_training_experiment(
     experiment = model = builder = backbone = dataset_provider = train_ds = val_ds = (
         ds_test
     ) = result_builder = summary = pretrain_best = None
+    tile_backbone = tile_preprocess_input = tile_size = None
     release_gpu_memory(clear_keras_session=pretrained_builder is None)
 
     exp_name = f"{mode}_{backbone_name}"
     if experiment_suffix:
         exp_name = f"{exp_name}_{experiment_suffix}"
     is_mil_run = is_mil_mode(mode)
-    batch_size = mil["BATCH_SIZE"] if is_mil_run else general["BATCH_SIZE"]
+    is_multibranch_run = mode == "multibranch"
+    if is_multibranch_run:
+        batch_size = int(multibranch_cfg.get("BATCH_SIZE", 16))
+    else:
+        batch_size = mil["BATCH_SIZE"] if is_mil_run else general["BATCH_SIZE"]
     # Default: cache on en simple/patch; off en full/abmil (canvases grandes, >100 GB posibles).
     cache_dataset = general.get(
         "CACHE_DATASET",
-        not is_mil_run and mode != "full",
+        not is_mil_run and mode not in ("full", "multibranch"),
     )
 
     # Modos PATCH: se remuestrea train (pos + hard/random neg) segun el ratio de la config,
@@ -216,6 +224,10 @@ def run_training_experiment(
             backbone, preprocess_input, input_size = resolve_backbone(
                 backbone_name, input_size=input_size
             )
+            if is_multibranch_run:
+                tile_backbone, tile_preprocess_input, tile_size = resolve_backbone(
+                    backbone_name
+                )
 
         dataset_provider = build_dataset_provider(
             config,
@@ -283,6 +295,15 @@ def run_training_experiment(
                 )
             if mode == "abmil_patch_alltiles_score":
                 run_config["PATCH_SCORE_USAGE"] = "concatenated_instance_feature"
+        if is_multibranch_run:
+            run_config["BAG_GRID"] = list(bag_grid)
+            run_config["BAG_CANVAS_MODE"] = bag_canvas_mode
+            run_config["TILE_SIZE"] = list(tile_size)
+            run_config["BAG_INSTANCES"] = bag_grid[0] * bag_grid[1]
+            run_config["ATTENTION_DIM"] = attention_dim
+            run_config["ATTENTION_GATED"] = attention_gated
+            run_config["FUSION_DIM"] = int(multibranch_cfg.get("FUSION_DIM", 128))
+            run_config["BRANCHES"] = ["full", "abmil"]
         if pretrained_builder is not None:
             pretrain_best = pretrained_builder.load_best_global_checkpoint()
             pretraining_mode = getattr(
@@ -306,6 +327,13 @@ def run_training_experiment(
         )
         run_config["STEPS_PER_EXECUTION"] = steps_per_execution
 
+        builder_kwargs = {}
+        if is_multibranch_run:
+            builder_kwargs.update(
+                tile_backbone=tile_backbone,
+                tile_preprocess_input=tile_preprocess_input,
+                tile_size=tile_size,
+            )
         builder = ModelBuilder(
             config,
             input_size,
@@ -318,6 +346,7 @@ def run_training_experiment(
             checkpoint_prefix=exp_name,
             lateralized_inputs=True,
             steps_per_execution=steps_per_execution,
+            **builder_kwargs,
         )
         model = builder.build()
 
@@ -380,6 +409,10 @@ def run_training_experiment(
         if hasattr(model, "guide_gate_value"):
             guide_gate_final = float(model.guide_gate_value())
             experiment.log_metric("guide_gate_final", guide_gate_final)
+        branch_diagnostics = {}
+        if hasattr(model, "branch_fusion_weight_norms"):
+            branch_diagnostics = model.branch_fusion_weight_norms()
+            experiment.log_metrics(branch_diagnostics)
 
         log_keras_eval_metrics(
             experiment,
@@ -474,6 +507,7 @@ def run_training_experiment(
                 "thr_youden": float(thr_youden),
                 "comet_url": comet_url,
                 **bootstrap_intervals,
+                **branch_diagnostics,
             }
             if str(best_global_checkpoint["monitor"]) == "val_auc":
                 summary["val_best_auc"] = float(best_global_checkpoint["value"])

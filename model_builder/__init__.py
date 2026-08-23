@@ -9,6 +9,7 @@ from src.model_builder.abmil import (
 from src.model_builder.base import BaseModelBuilder
 from src.model_builder.factory import create_model_builder
 from src.model_builder.full import FullModelBuilder
+from src.model_builder.multibranch import MultibranchModelBuilder
 from src.model_builder.patch import PatchAllTilesModelBuilder, PatchHardnegModelBuilder, PatchModelBuilder
 from src.model_builder.layers import BagTiling, GatedAttentionPooling, GuidedGatedAttentionPooling, LearnedGuidedGatedAttentionPooling
 from src.model_builder.mil_base import MilModelBuilderBase
@@ -29,6 +30,7 @@ __all__ = [
     "GuidedGatedAttentionPooling",
     "LearnedGuidedGatedAttentionPooling",
     "FullModelBuilder",
+    "MultibranchModelBuilder",
     "PatchHardnegModelBuilder",
     "PatchAllTilesModelBuilder",
     "PatchModelBuilder",

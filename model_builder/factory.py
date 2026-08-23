@@ -8,6 +8,7 @@ from src.model_builder.abmil import (
     AbmilPatchHardnegModelBuilder,
 )
 from src.model_builder.full import FullModelBuilder
+from src.model_builder.multibranch import MultibranchModelBuilder
 from src.model_builder.patch import PatchAllTilesModelBuilder, PatchHardnegModelBuilder, PatchModelBuilder
 from src.model_builder.simple import SimpleModelBuilder
 
@@ -23,10 +24,36 @@ _BUILDERS = {
     "patch": PatchModelBuilder,
     "patch_hardneg": PatchHardnegModelBuilder,
     "patch_alltiles": PatchAllTilesModelBuilder,
+    "multibranch": MultibranchModelBuilder,
 }
 
 
-def create_model_builder(config, IMG_SIZE, backbone, preprocess_input, *, mode="simple", initial_bias=None, focal_alpha=0.90, bag_size=None, pretrained_builder=None, checkpoint_prefix=None, lateralized_inputs=False, steps_per_execution=32, backbone_trainable=False, top_dense=256, dropout=0.4, learning_rate=1e-3, reduce_lr_factor=0.5, min_lr=1e-7, checkpoint_monitor=None, jit_compile=True):
+def create_model_builder(
+    config,
+    IMG_SIZE,
+    backbone,
+    preprocess_input,
+    *,
+    mode="simple",
+    initial_bias=None,
+    focal_alpha=0.90,
+    bag_size=None,
+    pretrained_builder=None,
+    checkpoint_prefix=None,
+    lateralized_inputs=False,
+    steps_per_execution=32,
+    backbone_trainable=False,
+    top_dense=256,
+    dropout=0.4,
+    learning_rate=1e-3,
+    reduce_lr_factor=0.5,
+    min_lr=1e-7,
+    checkpoint_monitor=None,
+    jit_compile=True,
+    tile_backbone=None,
+    tile_preprocess_input=None,
+    tile_size=None,
+):
     # Los hiperparametros compartidos salen del CONFIG del notebook; lo especifico
     # de cada corrida (backbone, mode, initial_bias, ...) sigue llegando por argumento.
     general = config["GENERAL"]
@@ -37,7 +64,44 @@ def create_model_builder(config, IMG_SIZE, backbone, preprocess_input, *, mode="
 
     # elige el builder segun MODE (simple / full / abmil / patch / patch_hardneg)
     mode = normalize_mode(mode)
-    common = dict(IMG_SIZE=IMG_SIZE, backbone=backbone, preprocess_input=preprocess_input, backbone_trainable=backbone_trainable, top_dense=top_dense, dropout=dropout, learning_rate=learning_rate, focal_alpha=focal_alpha, focal_gamma=training["FOCAL_GAMMA"], metric_to_maximize=metric_to_maximize, checkpoint_monitor=checkpoint_monitor, monitor_mode=monitor_mode, early_stopping_patience=training["EARLY_STOPPING_PATIENCE"], reduce_lr_patience=training["REDUCE_LR_PATIENCE"], reduce_lr_factor=reduce_lr_factor, min_lr=min_lr, aggressive_augmentation=training["AGGRESSIVE_AUGMENTATION"], initial_bias=initial_bias, pretrained_builder=pretrained_builder, jit_compile=jit_compile, steps_per_execution=steps_per_execution, checkpoint_prefix=checkpoint_prefix, lateralized_inputs=lateralized_inputs)
+    common = dict(
+        IMG_SIZE=IMG_SIZE,
+        backbone=backbone,
+        preprocess_input=preprocess_input,
+        backbone_trainable=backbone_trainable,
+        top_dense=top_dense,
+        dropout=dropout,
+        learning_rate=learning_rate,
+        focal_alpha=focal_alpha,
+        focal_gamma=training["FOCAL_GAMMA"],
+        metric_to_maximize=metric_to_maximize,
+        checkpoint_monitor=checkpoint_monitor,
+        monitor_mode=monitor_mode,
+        early_stopping_patience=training["EARLY_STOPPING_PATIENCE"],
+        reduce_lr_patience=training["REDUCE_LR_PATIENCE"],
+        reduce_lr_factor=reduce_lr_factor,
+        min_lr=min_lr,
+        aggressive_augmentation=training["AGGRESSIVE_AUGMENTATION"],
+        initial_bias=initial_bias,
+        pretrained_builder=pretrained_builder,
+        jit_compile=jit_compile,
+        steps_per_execution=steps_per_execution,
+        checkpoint_prefix=checkpoint_prefix,
+        lateralized_inputs=lateralized_inputs,
+    )
+    if mode == "multibranch":
+        full_cfg = config.get("FULL") or {}
+        multibranch_cfg = config.get("MULTIBRANCH") or {}
+        return _BUILDERS[mode](
+            **common,
+            tile_backbone=tile_backbone,
+            tile_preprocess_input=tile_preprocess_input,
+            tile_size=tile_size,
+            bag_grid=full_cfg.get("BAG_GRID", (3, 3)),
+            attention_dim=mil_config["ATTENTION_DIM"],
+            attention_gated=mil_config["ATTENTION_GATED"],
+            fusion_dim=multibranch_cfg.get("FUSION_DIM", 128),
+        )
     if is_mil_mode(mode):
         full_cfg = config.get("FULL") or {}
         mil = dict(
