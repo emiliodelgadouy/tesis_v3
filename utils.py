@@ -872,6 +872,13 @@ def dispose_model_builder(builder_obj) -> None:
     builder_obj.model = None
     builder_obj.backbone = None
     builder_obj.pretrained_builder = None
+    for attribute in (
+        "tile_backbone",
+        "pretrained_full_builder",
+        "pretrained_abmil_builder",
+    ):
+        if hasattr(builder_obj, attribute):
+            setattr(builder_obj, attribute, None)
 
 
 class TrainingTimer:

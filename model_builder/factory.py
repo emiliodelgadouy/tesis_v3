@@ -53,6 +53,8 @@ def create_model_builder(
     tile_backbone=None,
     tile_preprocess_input=None,
     tile_size=None,
+    pretrained_full_builder=None,
+    pretrained_abmil_builder=None,
 ):
     # Los hiperparametros compartidos salen del CONFIG del notebook; lo especifico
     # de cada corrida (backbone, mode, initial_bias, ...) sigue llegando por argumento.
@@ -101,6 +103,8 @@ def create_model_builder(
             attention_dim=mil_config["ATTENTION_DIM"],
             attention_gated=mil_config["ATTENTION_GATED"],
             fusion_dim=multibranch_cfg.get("FUSION_DIM", 128),
+            pretrained_full_builder=pretrained_full_builder,
+            pretrained_abmil_builder=pretrained_abmil_builder,
         )
     if is_mil_mode(mode):
         full_cfg = config.get("FULL") or {}

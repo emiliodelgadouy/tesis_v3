@@ -76,7 +76,13 @@ def _bootstrap_auc_intervals(
     }
 
 
-def _export_predictions(exp_name: str, table, y_true, y_prob) -> Path:
+def _export_predictions(
+    exp_name: str,
+    split_name: str,
+    table,
+    y_true,
+    y_prob,
+) -> Path:
     """Guarda predicciones alineadas para comparaciones pareadas sin reentrenar."""
     export_dir = Path("exports")
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -103,7 +109,7 @@ def _export_predictions(exp_name: str, table, y_true, y_prob) -> Path:
         )
     predictions["y_true"] = np.asarray(y_true, dtype=np.int64)
     predictions["y_prob"] = np.asarray(y_prob, dtype=np.float64)
-    path = export_dir / f"{exp_name}_test_predictions.csv"
+    path = export_dir / f"{exp_name}_{split_name}_predictions.csv"
     predictions.to_csv(path, index=False)
     return path
 
@@ -121,6 +127,7 @@ def run_training_experiment(
     return_summary=False,
     experiment_suffix=None,
     dispose_pretrained_builder=True,
+    branch_checkpoints=None,
 ):
     mode = normalize_mode(mode)
     general = config["GENERAL"]
@@ -163,6 +170,8 @@ def run_training_experiment(
         ds_test
     ) = result_builder = summary = pretrain_best = None
     tile_backbone = tile_preprocess_input = tile_size = None
+    source_full_builder = source_abmil_builder = None
+    transfer_diagnostics = {}
     release_gpu_memory(clear_keras_session=pretrained_builder is None)
 
     exp_name = f"{mode}_{backbone_name}"
@@ -170,6 +179,8 @@ def run_training_experiment(
         exp_name = f"{exp_name}_{experiment_suffix}"
     is_mil_run = is_mil_mode(mode)
     is_multibranch_run = mode == "multibranch"
+    if branch_checkpoints is not None and not is_multibranch_run:
+        raise ValueError("branch_checkpoints solo se admite en modo multibranch")
     if is_multibranch_run:
         batch_size = int(multibranch_cfg.get("BATCH_SIZE", 16))
     else:
@@ -228,6 +239,58 @@ def run_training_experiment(
                 tile_backbone, tile_preprocess_input, tile_size = resolve_backbone(
                     backbone_name
                 )
+
+        if branch_checkpoints is not None:
+            required = {"full", "abmil"}
+            missing = required.difference(branch_checkpoints)
+            if missing:
+                raise ValueError(
+                    f"Faltan checkpoints para el transfer multibranch: {sorted(missing)}"
+                )
+            checkpoint_paths = {
+                name: Path(branch_checkpoints[name]) for name in sorted(required)
+            }
+            missing_files = [
+                str(path) for path in checkpoint_paths.values() if not path.is_file()
+            ]
+            if missing_files:
+                raise FileNotFoundError(
+                    "No se encontraron checkpoints de ramas: " + ", ".join(missing_files)
+                )
+
+            source_full_backbone, source_full_preprocess, source_full_size = (
+                resolve_backbone(backbone_name, input_size=input_size)
+            )
+            source_full_builder = ModelBuilder(
+                config,
+                source_full_size,
+                source_full_backbone,
+                source_full_preprocess,
+                mode="full",
+                initial_bias=bias,
+                focal_alpha=focal_alpha,
+                lateralized_inputs=True,
+                steps_per_execution=1,
+            )
+            source_full_builder.build()
+            source_full_builder.model.load_weights(str(checkpoint_paths["full"]))
+
+            source_abmil_backbone, source_abmil_preprocess, source_abmil_size = (
+                resolve_backbone(backbone_name)
+            )
+            source_abmil_builder = ModelBuilder(
+                config,
+                source_abmil_size,
+                source_abmil_backbone,
+                source_abmil_preprocess,
+                mode="abmil",
+                initial_bias=bias,
+                focal_alpha=focal_alpha,
+                lateralized_inputs=True,
+                steps_per_execution=1,
+            )
+            source_abmil_builder.build()
+            source_abmil_builder.model.load_weights(str(checkpoint_paths["abmil"]))
 
         dataset_provider = build_dataset_provider(
             config,
@@ -304,6 +367,14 @@ def run_training_experiment(
             run_config["ATTENTION_GATED"] = attention_gated
             run_config["FUSION_DIM"] = int(multibranch_cfg.get("FUSION_DIM", 128))
             run_config["BRANCHES"] = ["full", "abmil"]
+            if branch_checkpoints is not None:
+                run_config["BRANCH_INITIALIZATION"] = "standalone_checkpoints"
+                run_config["FULL_SOURCE_CHECKPOINT"] = str(
+                    checkpoint_paths["full"]
+                )
+                run_config["ABMIL_SOURCE_CHECKPOINT"] = str(
+                    checkpoint_paths["abmil"]
+                )
         if pretrained_builder is not None:
             pretrain_best = pretrained_builder.load_best_global_checkpoint()
             pretraining_mode = getattr(
@@ -333,6 +404,8 @@ def run_training_experiment(
                 tile_backbone=tile_backbone,
                 tile_preprocess_input=tile_preprocess_input,
                 tile_size=tile_size,
+                pretrained_full_builder=source_full_builder,
+                pretrained_abmil_builder=source_abmil_builder,
             )
         builder = ModelBuilder(
             config,
@@ -349,10 +422,17 @@ def run_training_experiment(
             **builder_kwargs,
         )
         model = builder.build()
+        if hasattr(model, "branch_transfer_diagnostics"):
+            transfer_diagnostics = model.branch_transfer_diagnostics()
+        dispose_model_builder(source_full_builder)
+        dispose_model_builder(source_abmil_builder)
+        source_full_builder = source_abmil_builder = None
 
         experiment = start_training_experiment(
             config, experiment_name=exp_name, run_config=run_config, model=model.model
         )
+        if transfer_diagnostics:
+            experiment.log_metrics(transfer_diagnostics)
         log_dataset_class_counts(experiment, train=train_df, val=val_df, test=test_df)
         log_deterministic_input_samples(
             config, experiment, train_ds, experiment_name=exp_name, split_name="train"
@@ -409,10 +489,11 @@ def run_training_experiment(
         if hasattr(model, "guide_gate_value"):
             guide_gate_final = float(model.guide_gate_value())
             experiment.log_metric("guide_gate_final", guide_gate_final)
-        branch_diagnostics = {}
+        branch_diagnostics = dict(transfer_diagnostics)
         if hasattr(model, "branch_fusion_weight_norms"):
-            branch_diagnostics = model.branch_fusion_weight_norms()
-            experiment.log_metrics(branch_diagnostics)
+            fusion_diagnostics = model.branch_fusion_weight_norms()
+            branch_diagnostics.update(fusion_diagnostics)
+            experiment.log_metrics(fusion_diagnostics)
 
         log_keras_eval_metrics(
             experiment,
@@ -431,10 +512,18 @@ def run_training_experiment(
         y_test_true, y_test_prob = predict_probs_and_labels(model, ds_test)
 
         evaluation_cfg = config.get("EVALUATION") or {}
-        predictions_path = None
+        prediction_paths = {}
         if evaluation_cfg.get("EXPORT_PREDICTIONS", False):
-            predictions_path = _export_predictions(
+            prediction_paths["val"] = _export_predictions(
                 exp_name,
+                "val",
+                val_df,
+                y_val_true,
+                y_val_prob,
+            )
+            prediction_paths["test"] = _export_predictions(
+                exp_name,
+                "test",
                 test_df,
                 y_test_true,
                 y_test_prob,
@@ -502,6 +591,7 @@ def run_training_experiment(
                 "input_size": list(input_size),
                 "val_best_metric_name": str(best_global_checkpoint["monitor"]),
                 "val_best_metric": float(best_global_checkpoint["value"]),
+                "final_weights_file": str(best_global_checkpoint["path"]),
                 "test_roc_auc": float(roc_auc_score(y_test_true, y_test_prob)),
                 "test_pr_auc": float(average_precision_score(y_test_true, y_test_prob)),
                 "thr_youden": float(thr_youden),
@@ -511,8 +601,13 @@ def run_training_experiment(
             }
             if str(best_global_checkpoint["monitor"]) == "val_auc":
                 summary["val_best_auc"] = float(best_global_checkpoint["value"])
-            if predictions_path is not None:
-                summary["predictions_file"] = str(predictions_path)
+            if prediction_paths:
+                summary["val_predictions_file"] = str(prediction_paths["val"])
+                summary["test_predictions_file"] = str(
+                    prediction_paths["test"]
+                )
+                # Alias legacy usado por notebooks anteriores.
+                summary["predictions_file"] = str(prediction_paths["test"])
             if guide_gate_final is not None:
                 summary["guide_gate_final"] = guide_gate_final
             if pretrain_best is not None:
@@ -536,6 +631,8 @@ def run_training_experiment(
     finally:
         keep_builder = return_builder and result_builder is not None
         keep_pretrained_builder = pretrained_builder is not None and not dispose_pretrained_builder
+        dispose_model_builder(source_full_builder)
+        dispose_model_builder(source_abmil_builder)
         del dataset_provider, train_ds, val_ds, ds_test
 
         if keep_builder or keep_pretrained_builder:

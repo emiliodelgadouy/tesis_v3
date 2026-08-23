@@ -3,7 +3,7 @@
 Modos de entrenamiento:
 
 - `simple`, `full`, `patch`, `patch_hardneg`, `patch_alltiles`
-- `multibranch`: fusiona una rama global FULL con una rama local ABMIL sobre el mismo canvas
+- `multibranch`: fusiona una rama global FULL con una rama local ABMIL sobre el mismo canvas; puede inicializar ambas desde checkpoints standalone mediante `branch_checkpoints={"full": ..., "abmil": ...}`
 - `abmil`
 - `abmil_patch_hardneg`: transfiere backbone y proyección densa; usa una salida de bag nueva
 - `abmil_patch_hardneg_guided`: además usa el clasificador patch por instancia para inicializar

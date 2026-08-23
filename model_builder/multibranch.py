@@ -26,6 +26,8 @@ class MultibranchModelBuilder(BaseModelBuilder):
         attention_dim=128,
         attention_gated=True,
         fusion_dim=128,
+        pretrained_full_builder=None,
+        pretrained_abmil_builder=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -59,6 +61,13 @@ class MultibranchModelBuilder(BaseModelBuilder):
         self.attention_dim = int(attention_dim)
         self.attention_gated = bool(attention_gated)
         self.fusion_dim = int(fusion_dim)
+        if (pretrained_full_builder is None) != (pretrained_abmil_builder is None):
+            raise ValueError(
+                "El transfer multibranch requiere juntos los builders FULL y ABMIL"
+            )
+        self.pretrained_full_builder = pretrained_full_builder
+        self.pretrained_abmil_builder = pretrained_abmil_builder
+        self._branch_transfer_diagnostics = {}
 
     @staticmethod
     def _keep_batch_norm_frozen(model):
@@ -86,6 +95,7 @@ class MultibranchModelBuilder(BaseModelBuilder):
         learning_rate=None,
         train_batch_norm=False,
     ):
+        self._set_transferred_branch_heads_trainable(True)
         self._set_partial(self.backbone, trainable_fraction)
         self._set_partial(self.tile_backbone, trainable_fraction)
         if not train_batch_norm:
@@ -100,6 +110,7 @@ class MultibranchModelBuilder(BaseModelBuilder):
         learning_rate=None,
         train_batch_norm=False,
     ):
+        self._set_transferred_branch_heads_trainable(trainable)
         self.backbone.trainable = trainable
         self.tile_backbone.trainable = trainable
         if trainable and not train_batch_norm:
@@ -171,7 +182,87 @@ class MultibranchModelBuilder(BaseModelBuilder):
         outputs = self.output(fused)
 
         self.model = keras.Model(inputs, outputs, name=self.model_name)
+        self._transfer_pretrained_branches()
         return self.compile()
+
+    def _set_transferred_branch_heads_trainable(self, trainable):
+        if self.pretrained_full_builder is None or self.model is None:
+            return
+        self.model.get_layer("full_dense").trainable = trainable
+        self.model.get_layer("td_instance_dense").layer.trainable = trainable
+        self.model.get_layer("attention_pooling").trainable = trainable
+
+    @staticmethod
+    def _max_abs_weight_diff(source_weights, target_weights):
+        if len(source_weights) != len(target_weights):
+            return float("inf")
+        differences = [
+            float(np.max(np.abs(source - target)))
+            for source, target in zip(source_weights, target_weights)
+            if source.size
+        ]
+        return max(differences, default=0.0)
+
+    def _transfer_pretrained_branches(self):
+        """Inicializa ambas ramas desde modelos mamográficos ya entrenados.
+
+        FULL aporta su encoder y proyección global. ABMIL aporta el encoder de
+        tiles, la proyección de instancia y la atención. Los clasificadores
+        binarios se descartan porque la salida multibranch debe aprenderse nueva.
+        """
+        full_source = self.pretrained_full_builder
+        abmil_source = self.pretrained_abmil_builder
+        if full_source is None:
+            return
+        if full_source.model is None or abmil_source.model is None:
+            raise RuntimeError("Los modelos FULL/ABMIL fuente deben estar construidos")
+
+        try:
+            source_full_dense = full_source.model.get_layer("dense")
+            source_instance_dense = abmil_source.model.get_layer(
+                "td_instance_dense"
+            ).layer
+            source_attention = abmil_source.model.get_layer("attention_pooling")
+            target_full_dense = self.model.get_layer("full_dense")
+            target_instance_dense = self.model.get_layer("td_instance_dense").layer
+            target_attention = self.model.get_layer("attention_pooling")
+        except ValueError as exc:
+            raise RuntimeError(
+                "Los checkpoints fuente no tienen la arquitectura FULL/ABMIL esperada"
+            ) from exc
+
+        self.backbone.set_weights(full_source.backbone.get_weights())
+        target_full_dense.set_weights(source_full_dense.get_weights())
+        self.tile_backbone.set_weights(abmil_source.backbone.get_weights())
+        target_instance_dense.set_weights(source_instance_dense.get_weights())
+        target_attention.set_weights(source_attention.get_weights())
+
+        self._branch_transfer_diagnostics = {
+            "transfer_applied": 1.0,
+            "transfer_full_backbone_max_abs_diff": self._max_abs_weight_diff(
+                full_source.backbone.get_weights(), self.backbone.get_weights()
+            ),
+            "transfer_full_dense_max_abs_diff": self._max_abs_weight_diff(
+                source_full_dense.get_weights(), target_full_dense.get_weights()
+            ),
+            "transfer_abmil_backbone_max_abs_diff": self._max_abs_weight_diff(
+                abmil_source.backbone.get_weights(), self.tile_backbone.get_weights()
+            ),
+            "transfer_abmil_dense_max_abs_diff": self._max_abs_weight_diff(
+                source_instance_dense.get_weights(), target_instance_dense.get_weights()
+            ),
+            "transfer_abmil_attention_max_abs_diff": self._max_abs_weight_diff(
+                source_attention.get_weights(), target_attention.get_weights()
+            ),
+        }
+        self._set_transferred_branch_heads_trainable(False)
+        print(
+            "Transfer multibranch aplicado: FULL (backbone+dense) + "
+            "ABMIL (backbone+instance_dense+attention); clasificadores descartados"
+        )
+
+    def branch_transfer_diagnostics(self) -> dict[str, float]:
+        return dict(self._branch_transfer_diagnostics)
 
     def branch_fusion_weight_norms(self) -> dict[str, float]:
         """Magnitud relativa de cada mitad de entrada de la cabeza de fusión."""

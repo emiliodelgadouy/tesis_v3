@@ -33,6 +33,35 @@ def _backbone(size, name):
 
 
 class MultibranchModelTest(unittest.TestCase):
+    def _standalone_sources(self):
+        full = create_model_builder(
+            _config(),
+            (8, 8),
+            _backbone((8, 8), "pretrained_full_source"),
+            lambda x: x,
+            mode="full",
+            top_dense=6,
+            dropout=0.0,
+            initial_bias=0.0,
+            jit_compile=False,
+            steps_per_execution=1,
+        )
+        full.build()
+        abmil = create_model_builder(
+            _config(),
+            (4, 4),
+            _backbone((4, 4), "pretrained_abmil_source"),
+            lambda x: x,
+            mode="abmil",
+            top_dense=6,
+            dropout=0.0,
+            initial_bias=0.0,
+            jit_compile=False,
+            steps_per_execution=1,
+        )
+        abmil.build()
+        return full, abmil
+
     def test_builds_one_output_from_full_and_local_branches(self):
         builder = create_model_builder(
             _config(),
@@ -81,6 +110,44 @@ class MultibranchModelTest(unittest.TestCase):
 
         self.assertTrue(builder.backbone.trainable)
         self.assertTrue(builder.tile_backbone.trainable)
+
+    def test_transfers_both_specialists_and_freezes_them_for_stage_one(self):
+        full_source, abmil_source = self._standalone_sources()
+        builder = create_model_builder(
+            _config(),
+            (8, 8),
+            _backbone((8, 8), "fresh_full_target"),
+            lambda x: x,
+            mode="multibranch",
+            tile_backbone=_backbone((4, 4), "fresh_tile_target"),
+            tile_preprocess_input=lambda x: x,
+            tile_size=(4, 4),
+            pretrained_full_builder=full_source,
+            pretrained_abmil_builder=abmil_source,
+            top_dense=6,
+            dropout=0.0,
+            initial_bias=0.0,
+            jit_compile=False,
+            steps_per_execution=1,
+        )
+        builder.build()
+
+        diagnostics = builder.branch_transfer_diagnostics()
+        self.assertEqual(diagnostics["transfer_applied"], 1.0)
+        for name, value in diagnostics.items():
+            if name.endswith("max_abs_diff"):
+                self.assertEqual(value, 0.0, name)
+        self.assertFalse(builder.model.get_layer("full_dense").trainable)
+        self.assertFalse(builder.model.get_layer("td_instance_dense").layer.trainable)
+        self.assertFalse(builder.model.get_layer("attention_pooling").trainable)
+
+        builder.make_backbone_partially_trainable(
+            trainable_fraction=0.5,
+            learning_rate=1e-4,
+        )
+        self.assertTrue(builder.model.get_layer("full_dense").trainable)
+        self.assertTrue(builder.model.get_layer("td_instance_dense").layer.trainable)
+        self.assertTrue(builder.model.get_layer("attention_pooling").trainable)
 
 
 if __name__ == "__main__":
