@@ -7,20 +7,30 @@ TRAINING_MODES = (
     "abmil",
     "abmil_patch_hardneg",
     "abmil_patch_hardneg_guided",
+    "abmil_patch_alltiles",
+    "abmil_patch_alltiles_gated",
+    "abmil_patch_alltiles_score",
     "full",
     "patch",
     "patch_hardneg",
+    "patch_alltiles",
 )
 
 MIL_MODES = (
     "abmil",
     "abmil_patch_hardneg",
     "abmil_patch_hardneg_guided",
+    "abmil_patch_alltiles",
+    "abmil_patch_alltiles_gated",
+    "abmil_patch_alltiles_score",
 )
 
 PATCH_PRETRAINED_MIL_MODES = (
     "abmil_patch_hardneg",
     "abmil_patch_hardneg_guided",
+    "abmil_patch_alltiles",
+    "abmil_patch_alltiles_gated",
+    "abmil_patch_alltiles_score",
 )
 
 # Clave sin guiones ni underscores (ver normalize_mode).
@@ -29,9 +39,13 @@ _NORMALIZED_TO_MODE = {
     "abmil": "abmil",
     "abmilpatchhardneg": "abmil_patch_hardneg",
     "abmilpatchhardnegguided": "abmil_patch_hardneg_guided",
+    "abmilpatchalltiles": "abmil_patch_alltiles",
+    "abmilpatchalltilesgated": "abmil_patch_alltiles_gated",
+    "abmilpatchalltilesscore": "abmil_patch_alltiles_score",
     "full": "full",
     "patch": "patch",
     "patchhardneg": "patch_hardneg",
+    "patchalltiles": "patch_alltiles",
 }
 
 
@@ -54,7 +68,7 @@ def uses_patch_pretraining(mode: str) -> bool:
 
 
 def is_patch_mode(mode: str) -> bool:
-    return normalize_mode(mode) in ("patch", "patch_hardneg")
+    return normalize_mode(mode) in ("patch", "patch_hardneg", "patch_alltiles")
 
 
 def resolve_training_mode(

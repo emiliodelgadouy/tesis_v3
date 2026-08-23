@@ -882,6 +882,9 @@ class TfDatasetConfig:
     patch_roi_sigma_frac: float = 0.1
     patch_avoid_roi_max_attempts: int = 64
     patch_align_to_bag_grid: bool = False
+    # Si se define, cada fila indica explícitamente qué tile de la grilla usar.
+    # Se usa por patch_alltiles para entrenar/evaluar sobre candidatos exhaustivos.
+    patch_tile_index_column: str | None = None
     # Reescala la imagen al canvas del bag (rows*ph x cols*pw) antes de recortar,
     # para que el parche vea la misma escala que los tiles de ABMIL, pero muestreando
     # libremente con las estrategias roi/avoid_roi (sin fijar a la grilla).
@@ -901,6 +904,8 @@ class TfDatasetConfig:
         if is_mil_mode(self.mode):
             return False
         if not self.patch_mode:
+            return False
+        if self.patch_tile_index_column is not None:
             return False
         if self.patch_align_to_bag_grid:
             return True
@@ -952,6 +957,7 @@ class DatasetProviderConfig:
     patch_roi_sigma_frac: float = 0.1
     patch_avoid_roi_max_attempts: int = 64
     patch_align_to_bag_grid: bool = False
+    patch_tile_index_column: str | None = None
     patch_resize_to_bag_canvas: bool = True
     return_crop_offset: bool = False
     positive_mixup: bool = False
@@ -999,6 +1005,7 @@ class DatasetProviderConfig:
             patch_roi_sigma_frac=self.patch_roi_sigma_frac,
             patch_avoid_roi_max_attempts=self.patch_avoid_roi_max_attempts,
             patch_align_to_bag_grid=self.patch_align_to_bag_grid,
+            patch_tile_index_column=self.patch_tile_index_column,
             patch_resize_to_bag_canvas=self.patch_resize_to_bag_canvas,
             return_crop_offset=self.return_crop_offset,
             positive_mixup=self.positive_mixup,
@@ -1754,6 +1761,7 @@ class DatasetProvider:
         roi_ymax: tf.Tensor,
         *,
         random_patch: bool,
+        patch_tile_index: tf.Tensor | None = None,
     ) -> tf.Tensor:
         ph, pw = self._height, self._width
         if self.config.patch_align_to_bag_grid or self.config.patch_resize_to_bag_canvas:
@@ -1773,7 +1781,16 @@ class DatasetProvider:
         max_x = tf.maximum(w - pw, 0)
         strategy = self.config.patch_crop_strategy
 
-        if self.config.patch_align_to_bag_grid:
+        if patch_tile_index is not None:
+            rows, cols = self.config.bag_grid
+            tile_index = tf.clip_by_value(
+                tf.cast(patch_tile_index, tf.int32),
+                0,
+                rows * cols - 1,
+            )
+            y0 = (tile_index // cols) * ph
+            x0 = (tile_index % cols) * pw
+        elif self.config.patch_align_to_bag_grid:
             y0, x0 = self._bag_aligned_tile_offsets(
                 path,
                 label,
@@ -1923,6 +1940,7 @@ class DatasetProvider:
         flip_lateral: tf.Tensor | None = None,
         *,
         random_patch: bool = False,
+        patch_tile_index: tf.Tensor | None = None,
     ) -> tuple[tf.Tensor, tf.Tensor]:
         img = decode_image(path)
         if flip_lateral is not None:
@@ -1949,6 +1967,7 @@ class DatasetProvider:
                 roi_xmax,
                 roi_ymax,
                 random_patch=random_patch,
+                patch_tile_index=patch_tile_index,
             )
             if self.config.return_crop_offset:
                 img, y0, x0, crop_h, crop_w = patch_out
@@ -1985,7 +2004,17 @@ class DatasetProvider:
         roi_tensors: tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor] | tuple[()] = ()
         if self.config.needs_roi_columns():
             roi_tensors = self._roi_norm_tensors(tbl)
-        elements: tuple[Any, ...] = (paths, labels, *roi_tensors)
+        tile_tensors: tuple[tf.Tensor, ...] | tuple[()] = ()
+        tile_column = self.config.patch_tile_index_column
+        if tile_column is not None:
+            if tile_column not in tbl.columns:
+                raise KeyError(
+                    f"patch_tile_index_column={tile_column!r} no existe en la tabla"
+                )
+            tile_tensors = (
+                tf.constant(tbl[tile_column].astype(np.int32).values),
+            )
+        elements: tuple[Any, ...] = (paths, labels, *roi_tensors, *tile_tensors)
         if not self.config.lateralize:
             return tf.data.Dataset.from_tensor_slices(elements)
 
@@ -2017,6 +2046,7 @@ class DatasetProvider:
 
     def _make_process_fn(self, *, random_patch: bool):
         with_roi = self.config.needs_roi_columns()
+        with_tile_index = self.config.patch_tile_index_column is not None
 
         if self.config.lateralize:
 
@@ -2025,37 +2055,37 @@ class DatasetProvider:
                 label: tf.Tensor,
                 *extra: tf.Tensor,
             ) -> tuple[tf.Tensor, tf.Tensor]:
+                cursor = 0
                 if with_roi:
-                    roi_xmin, roi_ymin, roi_xmax, roi_ymax, flip_lateral = extra
-                    return self._process(
-                        path,
-                        label,
-                        roi_xmin,
-                        roi_ymin,
-                        roi_xmax,
-                        roi_ymax,
-                        flip_lateral=flip_lateral,
-                        random_patch=random_patch,
-                    )
-                flip_lateral = extra[0]
+                    roi_xmin, roi_ymin, roi_xmax, roi_ymax = extra[:4]
+                    cursor = 4
+                else:
+                    roi_xmin = roi_ymin = roi_xmax = roi_ymax = tf.constant(0.0, tf.float32)
+                patch_tile_index = extra[cursor] if with_tile_index else None
+                cursor += int(with_tile_index)
+                flip_lateral = extra[cursor]
                 return self._process(
                     path,
                     label,
-                    tf.constant(0.0, tf.float32),
-                    tf.constant(0.0, tf.float32),
-                    tf.constant(0.0, tf.float32),
-                    tf.constant(0.0, tf.float32),
+                    roi_xmin,
+                    roi_ymin,
+                    roi_xmax,
+                    roi_ymax,
                     flip_lateral=flip_lateral,
                     random_patch=random_patch,
+                    patch_tile_index=patch_tile_index,
                 )
 
             return process_with_laterality
 
         def process(path: tf.Tensor, label: tf.Tensor, *extra: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+            cursor = 0
             if with_roi:
-                roi_xmin, roi_ymin, roi_xmax, roi_ymax = extra
+                roi_xmin, roi_ymin, roi_xmax, roi_ymax = extra[:4]
+                cursor = 4
             else:
                 roi_xmin = roi_ymin = roi_xmax = roi_ymax = tf.constant(0.0, tf.float32)
+            patch_tile_index = extra[cursor] if with_tile_index else None
             return self._process(
                 path,
                 label,
@@ -2064,6 +2094,7 @@ class DatasetProvider:
                 roi_xmax,
                 roi_ymax,
                 random_patch=random_patch,
+                patch_tile_index=patch_tile_index,
             )
 
         return process
@@ -2219,6 +2250,9 @@ def build_dataset_provider(
             # Los kwargs explicitos pisan los defaults del CONFIG.
             kwargs = {**defaults, **kwargs}
         kwargs = resolve_mode_kwargs(kwargs)
+        if kwargs.get("mode") == "patch_alltiles":
+            kwargs.setdefault("patch_tile_index_column", "_patch_tile_index")
+            kwargs.setdefault("patch_resize_to_bag_canvas", True)
         provider_config = DatasetProviderConfig(
             image_size=image_size,
             batch_size=batch_size,

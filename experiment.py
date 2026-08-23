@@ -6,6 +6,10 @@ extraida de los notebooks para que las celdas queden en una sola llamada.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
+
 from src.backbones import get_backbone, resolve_backbone
 from src.comet_logging import (
     log_dataset_class_counts,
@@ -22,6 +26,7 @@ from src.utils import (
     TrainingTimer,
     apply_probability_threshold,
     dispose_model_builder,
+    expand_grid_patch_table,
     logit_initial_bias,
     predict_probs_and_labels,
     release_gpu_memory,
@@ -31,6 +36,74 @@ from src.utils import (
     threshold_recall_target,
     threshold_youden_j,
 )
+
+
+def _bootstrap_auc_intervals(
+    y_true,
+    y_prob,
+    *,
+    samples: int,
+    seed: int,
+) -> dict[str, float]:
+    """Intervalos bootstrap estratificados para ROC-AUC y PR-AUC."""
+    if samples <= 0:
+        return {}
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    y_true = np.asarray(y_true, dtype=np.int64).reshape(-1)
+    y_prob = np.asarray(y_prob, dtype=np.float64).reshape(-1)
+    positive = np.flatnonzero(y_true == 1)
+    negative = np.flatnonzero(y_true == 0)
+    if len(positive) == 0 or len(negative) == 0:
+        return {}
+    rng = np.random.default_rng(seed)
+    roc_values = np.empty(samples, dtype=np.float64)
+    pr_values = np.empty(samples, dtype=np.float64)
+    for index in range(samples):
+        sampled = np.concatenate(
+            [
+                rng.choice(positive, size=len(positive), replace=True),
+                rng.choice(negative, size=len(negative), replace=True),
+            ]
+        )
+        roc_values[index] = roc_auc_score(y_true[sampled], y_prob[sampled])
+        pr_values[index] = average_precision_score(y_true[sampled], y_prob[sampled])
+    return {
+        "test_roc_auc_ci_low": float(np.quantile(roc_values, 0.025)),
+        "test_roc_auc_ci_high": float(np.quantile(roc_values, 0.975)),
+        "test_pr_auc_ci_low": float(np.quantile(pr_values, 0.025)),
+        "test_pr_auc_ci_high": float(np.quantile(pr_values, 0.975)),
+    }
+
+
+def _export_predictions(exp_name: str, table, y_true, y_prob) -> Path:
+    """Guarda predicciones alineadas para comparaciones pareadas sin reentrenar."""
+    export_dir = Path("exports")
+    export_dir.mkdir(parents=True, exist_ok=True)
+    columns = [
+        column
+        for column in (
+            "patient_id",
+            "image_id",
+            "path",
+            "cls",
+            "_bag_cls",
+            "_patch_tile_index",
+            "_roi_tile_overlap",
+        )
+        if column in table.columns
+    ]
+    predictions = table[columns].reset_index(drop=True).copy()
+    if len(predictions) != len(y_true):
+        raise RuntimeError(
+            f"No se pueden exportar predicciones de {exp_name}: "
+            f"tabla={len(predictions)} vs predicciones={len(y_true)}"
+        )
+    predictions["y_true"] = np.asarray(y_true, dtype=np.int64)
+    predictions["y_prob"] = np.asarray(y_prob, dtype=np.float64)
+    path = export_dir / f"{exp_name}_test_predictions.csv"
+    predictions.to_csv(path, index=False)
+    return path
 
 
 def run_training_experiment(
@@ -54,6 +127,7 @@ def run_training_experiment(
     full_cfg = config.get("FULL") or {}
     patch_cfg = config.get("PATCH") or {}
     patch_hardneg_cfg = config.get("PATCH_HARDNEG") or {}
+    patch_alltiles_cfg = config.get("PATCH_ALLTILES") or {}
 
     # Parametros derivados de la config (antes se pasaban sueltos por argumento):
     bag_grid = full_cfg.get("BAG_GRID", (3, 3))
@@ -62,12 +136,14 @@ def run_training_experiment(
     attention_dim = mil["ATTENTION_DIM"]
     attention_gated = mil["ATTENTION_GATED"]
     patch_resize_to_bag_canvas = patch_cfg.get("RESIZE_TO_BAG_CANVAS", True)
-    # Solo patch_hardneg puede alinearse a la grilla del bag.
+    # patch_hardneg puede alinear su muestreo; patch_alltiles fuerza el tile exacto
+    # mediante ``patch_tile_index_column`` mas abajo.
     patch_align_to_bag_grid = (
         patch_hardneg_cfg.get("ALIGN_TO_BAG_GRID", False)
         if mode == "patch_hardneg"
         else False
     )
+    patch_tile_index_column = "_patch_tile_index" if mode == "patch_alltiles" else None
     # FULL = misma escala que el canvas ABMIL: BAG_GRID * tamaño nativo del backbone.
     # FULL["INPUT_SIZE"] queda como override opcional (p.ej. pruebas puntuales).
     if mode == "full":
@@ -82,7 +158,7 @@ def run_training_experiment(
 
     experiment = model = builder = backbone = dataset_provider = train_ds = val_ds = (
         ds_test
-    ) = result_builder = summary = None
+    ) = result_builder = summary = pretrain_best = None
     release_gpu_memory(clear_keras_session=pretrained_builder is None)
 
     exp_name = f"{mode}_{backbone_name}"
@@ -98,7 +174,19 @@ def run_training_experiment(
 
     # Modos PATCH: se remuestrea train (pos + hard/random neg) segun el ratio de la config,
     # y de ese remuestreo salen focal_alpha e initial_bias. El resto usa el train tal cual.
-    if mode in ("patch", "patch_hardneg"):
+    if mode == "patch_alltiles":
+        train_df = expand_grid_patch_table(config, train_df, training=True)
+        val_df = expand_grid_patch_table(config, val_df, training=False)
+        test_df = expand_grid_patch_table(config, test_df, training=False)
+        n_pos = int((train_df["cls"] == 1).sum())
+        n_neg = int((train_df["cls"] == 0).sum())
+        if n_pos == 0 or n_neg == 0:
+            raise ValueError(
+                f"patch_alltiles necesita ambas clases de tile; recibido pos={n_pos}, neg={n_neg}"
+            )
+        focal_alpha = n_neg / len(train_df)
+        bias = logit_initial_bias(n_pos, n_neg)
+    elif mode in ("patch", "patch_hardneg"):
         patch_ratio = (
             config["PATCH_HARDNEG"]
             if mode == "patch_hardneg"
@@ -136,6 +224,7 @@ def run_training_experiment(
             lateralize=True,
             mode=mode,
             patch_align_to_bag_grid=patch_align_to_bag_grid,
+            patch_tile_index_column=patch_tile_index_column,
             cache_dataset=cache_dataset,
         )
         train_ds, val_ds, ds_test = dataset_provider.build_splits(
@@ -153,11 +242,23 @@ def run_training_experiment(
             "CACHE_DATASET": cache_dataset,
             "JIT_COMPILE": True,
         }
-        if mode in ("patch", "patch_hardneg"):
+        if mode in ("patch", "patch_hardneg", "patch_alltiles"):
             run_config["PATCH_ALIGN_TO_BAG_GRID"] = patch_align_to_bag_grid
             run_config["PATCH_RESIZE_TO_BAG_CANVAS"] = patch_resize_to_bag_canvas
-            run_config["PATCH_EVAL_USES_ROI_ORACLE"] = True
-            if patch_align_to_bag_grid or patch_resize_to_bag_canvas:
+            run_config["PATCH_EVAL_USES_ROI_ORACLE"] = mode != "patch_alltiles"
+            if mode == "patch_alltiles":
+                run_config["PATCH_EXACT_BAG_GRID_TILES"] = True
+                run_config["PATCH_ALLTILES_EXHAUSTIVE_EVAL"] = True
+                run_config["PATCH_ALLTILES_MIN_ROI_TILE_OVERLAP"] = patch_alltiles_cfg.get(
+                    "MIN_ROI_TILE_OVERLAP", 0.0
+                )
+                run_config["PATCH_ALLTILES_HARD_NEG_RATIO"] = patch_alltiles_cfg.get(
+                    "HARD_NEGATIVE_TO_POSITIVE_RATIO", 4.0
+                )
+                run_config["PATCH_ALLTILES_RANDOM_NEG_RATIO"] = patch_alltiles_cfg.get(
+                    "RANDOM_NEGATIVE_TO_POSITIVE_RATIO", 4.0
+                )
+            if mode == "patch_alltiles" or patch_align_to_bag_grid or patch_resize_to_bag_canvas:
                 run_config["BAG_GRID"] = list(bag_grid)
                 run_config["BAG_CANVAS_MODE"] = bag_canvas_mode
         if is_mil_run:
@@ -172,10 +273,16 @@ def run_training_experiment(
             run_config["ATTENTION_DIM"] = attention_dim
             run_config["ATTENTION_GATED"] = attention_gated
             run_config["BAG_SIZE"] = bag_grid[0] * bag_grid[1]
-            if mode == "abmil_patch_hardneg_guided":
-                run_config["GUIDED_ATTENTION_SOURCE"] = "patch_hardneg_instance_logits"
+            if mode in ("abmil_patch_hardneg_guided", "abmil_patch_alltiles_gated"):
+                run_config["GUIDED_ATTENTION_SOURCE"] = "patch_instance_logits"
                 run_config["GUIDED_ATTENTION_TEMPERATURE"] = mil.get("GUIDED_ATTENTION_TEMPERATURE", 1.0)
                 run_config["GUIDED_ATTENTION_STRENGTH"] = mil.get("GUIDED_ATTENTION_STRENGTH", 1.0)
+            if mode == "abmil_patch_alltiles_gated":
+                run_config["GUIDED_ATTENTION_INITIAL_GATE"] = mil.get(
+                    "GUIDED_ATTENTION_INITIAL_GATE", 0.05
+                )
+            if mode == "abmil_patch_alltiles_score":
+                run_config["PATCH_SCORE_USAGE"] = "concatenated_instance_feature"
         if pretrained_builder is not None:
             pretrain_best = pretrained_builder.load_best_global_checkpoint()
             pretraining_mode = getattr(
@@ -184,7 +291,11 @@ def run_training_experiment(
             run_config["PRETRAINED_FROM"] = f"{pretraining_mode}_{backbone_name}"
             run_config["PRETRAINED_BEST_VAL_METRIC"] = pretrain_best["value"]
             run_config["PRETRAINED_FROZEN_STAGE1"] = ["backbone", "dense"]
-            if mode == "abmil_patch_hardneg_guided":
+            if mode in (
+                "abmil_patch_hardneg_guided",
+                "abmil_patch_alltiles_gated",
+                "abmil_patch_alltiles_score",
+            ):
                 run_config["PRETRAINED_FROZEN_STAGE1"].append("instance_output")
             run_config["BAG_OUTPUT_INITIALIZATION"] = "new"
 
@@ -265,6 +376,10 @@ def run_training_experiment(
         )
         log_training_timing_summary(experiment, training_timer)
         best_global_checkpoint = model.load_best_global_checkpoint()
+        guide_gate_final = None
+        if hasattr(model, "guide_gate_value"):
+            guide_gate_final = float(model.guide_gate_value())
+            experiment.log_metric("guide_gate_final", guide_gate_final)
 
         log_keras_eval_metrics(
             experiment,
@@ -281,6 +396,24 @@ def run_training_experiment(
         )
         y_val_true, y_val_prob = predict_probs_and_labels(model, val_ds)
         y_test_true, y_test_prob = predict_probs_and_labels(model, ds_test)
+
+        evaluation_cfg = config.get("EVALUATION") or {}
+        predictions_path = None
+        if evaluation_cfg.get("EXPORT_PREDICTIONS", False):
+            predictions_path = _export_predictions(
+                exp_name,
+                test_df,
+                y_test_true,
+                y_test_prob,
+            )
+        bootstrap_intervals = _bootstrap_auc_intervals(
+            y_test_true,
+            y_test_prob,
+            samples=int(evaluation_cfg.get("BOOTSTRAP_SAMPLES", 0)),
+            seed=int(general["RANDOM_SEED"]),
+        )
+        if bootstrap_intervals:
+            experiment.log_metrics(bootstrap_intervals)
 
         thr_youden = threshold_youden_j(y_val_true, y_val_prob)
         thr_recall90 = threshold_recall_target(
@@ -334,12 +467,23 @@ def run_training_experiment(
                 "mode": mode,
                 "backbone": backbone_name,
                 "input_size": list(input_size),
-                "val_best_auc": float(best_global_checkpoint["value"]),
+                "val_best_metric_name": str(best_global_checkpoint["monitor"]),
+                "val_best_metric": float(best_global_checkpoint["value"]),
                 "test_roc_auc": float(roc_auc_score(y_test_true, y_test_prob)),
                 "test_pr_auc": float(average_precision_score(y_test_true, y_test_prob)),
                 "thr_youden": float(thr_youden),
                 "comet_url": comet_url,
+                **bootstrap_intervals,
             }
+            if str(best_global_checkpoint["monitor"]) == "val_auc":
+                summary["val_best_auc"] = float(best_global_checkpoint["value"])
+            if predictions_path is not None:
+                summary["predictions_file"] = str(predictions_path)
+            if guide_gate_final is not None:
+                summary["guide_gate_final"] = guide_gate_final
+            if pretrain_best is not None:
+                summary["pretrained_checkpoint"] = str(pretrain_best["path"])
+                summary["pretrained_best_metric"] = float(pretrain_best["value"])
 
         if return_builder:
             model.pretraining_mode = mode

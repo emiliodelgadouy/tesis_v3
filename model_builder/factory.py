@@ -1,7 +1,14 @@
 from src.modes import is_mil_mode, normalize_mode
-from src.model_builder.abmil import AbmilModelBuilder, AbmilPatchHardnegGuidedModelBuilder, AbmilPatchHardnegModelBuilder
+from src.model_builder.abmil import (
+    AbmilModelBuilder,
+    AbmilPatchAlltilesGatedModelBuilder,
+    AbmilPatchAlltilesModelBuilder,
+    AbmilPatchAlltilesScoreModelBuilder,
+    AbmilPatchHardnegGuidedModelBuilder,
+    AbmilPatchHardnegModelBuilder,
+)
 from src.model_builder.full import FullModelBuilder
-from src.model_builder.patch import PatchHardnegModelBuilder, PatchModelBuilder
+from src.model_builder.patch import PatchAllTilesModelBuilder, PatchHardnegModelBuilder, PatchModelBuilder
 from src.model_builder.simple import SimpleModelBuilder
 
 _BUILDERS = {
@@ -10,8 +17,12 @@ _BUILDERS = {
     "abmil": AbmilModelBuilder,
     "abmil_patch_hardneg": AbmilPatchHardnegModelBuilder,
     "abmil_patch_hardneg_guided": AbmilPatchHardnegGuidedModelBuilder,
+    "abmil_patch_alltiles": AbmilPatchAlltilesModelBuilder,
+    "abmil_patch_alltiles_gated": AbmilPatchAlltilesGatedModelBuilder,
+    "abmil_patch_alltiles_score": AbmilPatchAlltilesScoreModelBuilder,
     "patch": PatchModelBuilder,
     "patch_hardneg": PatchHardnegModelBuilder,
+    "patch_alltiles": PatchAllTilesModelBuilder,
 }
 
 
@@ -40,6 +51,11 @@ def create_model_builder(config, IMG_SIZE, backbone, preprocess_input, *, mode="
             mil.update(
                 guided_attention_temperature=mil_config.get("GUIDED_ATTENTION_TEMPERATURE", 1.0),
                 guided_attention_strength=mil_config.get("GUIDED_ATTENTION_STRENGTH", 1.0),
+            )
+        elif mode == "abmil_patch_alltiles_gated":
+            mil.update(
+                guided_attention_temperature=mil_config.get("GUIDED_ATTENTION_TEMPERATURE", 1.0),
+                initial_guide_gate=mil_config.get("GUIDED_ATTENTION_INITIAL_GATE", 0.05),
             )
         return _BUILDERS[mode](**common, **mil)
     return _BUILDERS[mode](**common)

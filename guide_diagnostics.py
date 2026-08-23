@@ -1,4 +1,4 @@
-"""Diagnóstico de localización para la guía patch_hardneg → ABMIL.
+"""Diagnóstico de localización para una guía patch → ABMIL.
 
 La evaluación recorre todos los tiles de la grilla MIL. La ROI no participa en
 la inferencia: se usa solamente después para comprobar si el patch head ordenó
@@ -237,7 +237,7 @@ def evaluate_patch_guide_localization(
     comparando posteriormente el ranking de logits con el solapamiento ROI/tile.
     """
     if patch_builder is None or getattr(patch_builder, "model", None) is None:
-        raise ValueError("patch_builder debe conservar el modelo patch_hardneg entrenado")
+        raise ValueError("patch_builder debe conservar el modelo patch entrenado")
     if top_k <= 0:
         raise ValueError("top_k debe ser mayor que cero")
 

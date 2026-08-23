@@ -60,6 +60,7 @@ __all__ = [
     "decode_image",
     "deduplicate_images",
     "dispose_model_builder",
+    "expand_grid_patch_table",
     "logit_initial_bias",
     "predict_probs_and_labels",
     "prepare_dataset",
@@ -77,6 +78,137 @@ __all__ = [
     "undersample_negatives",
     "warmup",
 ]
+
+
+def expand_grid_patch_table(
+    config: dict[str, Any],
+    table: pd.DataFrame,
+    *,
+    training: bool,
+    label_column: str = "cls",
+    tile_index_column: str = "_patch_tile_index",
+) -> pd.DataFrame:
+    """Expande mamografías a tiles etiquetados sobre la misma grilla de ABMIL.
+
+    En validación/test conserva los candidatos exhaustivos. En train primero
+    genera todos los candidatos y luego limita por separado negativos de bolsas
+    positivas y negativas para que la ablación siga siendo ejecutable.
+    """
+    if len(table) == 0:
+        raise ValueError("expand_grid_patch_table recibió una tabla vacía")
+    if label_column not in table.columns:
+        raise KeyError(f"Falta la columna de etiqueta {label_column!r}")
+
+    full_cfg = config.get("FULL") or {}
+    alltiles_cfg = config.get("PATCH_ALLTILES") or {}
+    rows, cols = (int(value) for value in full_cfg.get("BAG_GRID", (3, 3)))
+    roi_columns = tuple(alltiles_cfg.get("ROI_NORM_COLUMNS", DEFAULT_ROI_NORM_COLUMNS))
+    missing = [column for column in roi_columns if column not in table.columns]
+    if missing:
+        raise KeyError(f"Faltan columnas ROI para patch_alltiles: {missing}")
+
+    source = table.reset_index(drop=True).copy()
+    source["_patch_source_row"] = np.arange(len(source), dtype=np.int64)
+    xmin_c, ymin_c, xmax_c, ymax_c = roi_columns
+    xmin = pd.to_numeric(source[xmin_c], errors="coerce").to_numpy(np.float64)
+    ymin = pd.to_numeric(source[ymin_c], errors="coerce").to_numpy(np.float64)
+    xmax = pd.to_numeric(source[xmax_c], errors="coerce").to_numpy(np.float64)
+    ymax = pd.to_numeric(source[ymax_c], errors="coerce").to_numpy(np.float64)
+
+    laterality_column = str(alltiles_cfg.get("LATERALITY_COLUMN", "laterality"))
+    flip_side = str(alltiles_cfg.get("LATERALIZE_FLIP_SIDE", "R"))
+    if laterality_column in source.columns:
+        flip = source[laterality_column].astype(str).to_numpy() == flip_side
+        old_xmin = xmin.copy()
+        xmin = np.where(flip, 1.0 - xmax, xmin)
+        xmax = np.where(flip, 1.0 - old_xmin, xmax)
+
+    xmin = np.clip(xmin, 0.0, 1.0)
+    ymin = np.clip(ymin, 0.0, 1.0)
+    xmax = np.clip(xmax, 0.0, 1.0)
+    ymax = np.clip(ymax, 0.0, 1.0)
+    roi_valid = (
+        np.isfinite(xmin + ymin + xmax + ymax)
+        & (xmin < xmax)
+        & (ymin < ymax)
+    )
+
+    bag_size = rows * cols
+    repeated = source.iloc[np.repeat(np.arange(len(source)), bag_size)].reset_index(drop=True)
+    tile_index = np.tile(np.arange(bag_size, dtype=np.int32), len(source))
+    repeated[tile_index_column] = tile_index
+    repeated["_bag_cls"] = repeated[label_column].astype(np.float32)
+
+    repeated_xmin = np.repeat(xmin, bag_size)
+    repeated_ymin = np.repeat(ymin, bag_size)
+    repeated_xmax = np.repeat(xmax, bag_size)
+    repeated_ymax = np.repeat(ymax, bag_size)
+    repeated_valid = np.repeat(roi_valid, bag_size)
+    tile_rows = tile_index // cols
+    tile_cols = tile_index % cols
+    tile_xmin = tile_cols / cols
+    tile_ymin = tile_rows / rows
+    tile_xmax = (tile_cols + 1) / cols
+    tile_ymax = (tile_rows + 1) / rows
+    overlap_w = np.maximum(0.0, np.minimum(tile_xmax, repeated_xmax) - np.maximum(tile_xmin, repeated_xmin))
+    overlap_h = np.maximum(0.0, np.minimum(tile_ymax, repeated_ymax) - np.maximum(tile_ymin, repeated_ymin))
+    overlap = overlap_w * overlap_h
+    min_overlap = float(alltiles_cfg.get("MIN_ROI_TILE_OVERLAP", 0.0))
+    positive_tile = (
+        (repeated["_bag_cls"].to_numpy() >= 0.5)
+        & repeated_valid
+        & (overlap > min_overlap)
+    )
+    repeated["_roi_tile_overlap"] = overlap.astype(np.float32)
+    repeated[label_column] = positive_tile.astype(np.float32)
+
+    positive_sources = source.loc[source[label_column] >= 0.5, "_patch_source_row"]
+    sources_with_positive_tile = set(
+        repeated.loc[repeated[label_column] >= 0.5, "_patch_source_row"].astype(int)
+    )
+    invalid_positive_sources = set(positive_sources.astype(int)) - sources_with_positive_tile
+    if invalid_positive_sources:
+        repeated = repeated[
+            ~repeated["_patch_source_row"].isin(invalid_positive_sources)
+        ].reset_index(drop=True)
+
+    if training:
+        seed = int(config["GENERAL"]["RANDOM_SEED"])
+        positives = repeated[repeated[label_column] >= 0.5]
+        hard_negatives = repeated[
+            (repeated["_bag_cls"] >= 0.5) & (repeated[label_column] < 0.5)
+        ]
+        random_negatives = repeated[repeated["_bag_cls"] < 0.5]
+
+        def _sample(pool: pd.DataFrame, ratio: float) -> pd.DataFrame:
+            count = min(len(pool), int(round(len(positives) * float(ratio))))
+            if count <= 0:
+                return pool.iloc[0:0]
+            return pool.sample(n=count, random_state=seed)
+
+        hard_negatives = _sample(
+            hard_negatives,
+            alltiles_cfg.get("HARD_NEGATIVE_TO_POSITIVE_RATIO", 4.0),
+        )
+        random_negatives = _sample(
+            random_negatives,
+            alltiles_cfg.get("RANDOM_NEGATIVE_TO_POSITIVE_RATIO", 4.0),
+        )
+        repeated = pd.concat(
+            [positives, hard_negatives, random_negatives],
+            ignore_index=True,
+        ).sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+    stats = {
+        "rows": len(repeated),
+        "positive_tiles": int((repeated[label_column] >= 0.5).sum()),
+        "negative_tiles": int((repeated[label_column] < 0.5).sum()),
+        "source_bags": int(repeated["_patch_source_row"].nunique()),
+        "dropped_positive_bags_invalid_roi": len(invalid_positive_sources),
+        "exhaustive": not training,
+    }
+    print("expand_grid_patch_table:", stats)
+    return repeated
 
 
 def deduplicate_images(

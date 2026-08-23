@@ -2,11 +2,20 @@
 
 Modos de entrenamiento:
 
-- `simple`, `full`, `patch`, `patch_hardneg`
+- `simple`, `full`, `patch`, `patch_hardneg`, `patch_alltiles`
 - `abmil`
 - `abmil_patch_hardneg`: transfiere backbone y proyección densa; usa una salida de bag nueva
 - `abmil_patch_hardneg_guided`: además usa el clasificador patch por instancia para inicializar
   la atención, sin reutilizarlo como clasificador global
+- `abmil_patch_alltiles`: transfer simple desde el preentrenamiento sobre candidatos de grilla
+- `abmil_patch_alltiles_gated`: añade los logits patch con una compuerta aprendible
+- `abmil_patch_alltiles_score`: concatena el logit patch al embedding de cada instancia
+
+`patch_alltiles` etiqueta primero todos los tiles de la grilla compartida y en
+train submuestrea por separado negativos de mamografías positivas y negativas.
+Validación/test conservan los tiles exhaustivos. Sus ratios se configuran en
+`PATCH_ALLTILES` y el notebook mínimo de ablación es
+`transfer_alltiles_ablation.ipynb` en el workspace conductor.
 
 Para la transferencia patch → ABMIL, entrenar `patch_hardneg` con
 `PATCH_HARDNEG.ALIGN_TO_BAG_GRID=True`. El modo guiado usa:

@@ -7,7 +7,7 @@ from tensorflow.keras import layers
 
 from src.modes import is_mil_mode, normalize_mode
 from src.model_builder.factory import create_model_builder
-from src.model_builder.layers import GuidedGatedAttentionPooling
+from src.model_builder.layers import GuidedGatedAttentionPooling, LearnedGuidedGatedAttentionPooling
 
 
 def _config():
@@ -25,6 +25,7 @@ def _config():
             "ATTENTION_GATED": True,
             "GUIDED_ATTENTION_TEMPERATURE": 1.0,
             "GUIDED_ATTENTION_STRENGTH": 1.0,
+            "GUIDED_ATTENTION_INITIAL_GATE": 0.05,
         },
         "FULL": {"BAG_GRID": (2, 2)},
     }
@@ -133,17 +134,52 @@ class GuidedAttentionTest(unittest.TestCase):
         self.assertFalse(np.array_equal(bag_output.get_weights()[0], source_output[0]))
         self.assertEqual(target.model.get_layer("guided_attention_pooling").w.numpy().sum(), 0.0)
 
-    def test_transferred_layers_unfreeze_after_stage_one(self):
+    def test_legacy_guided_keeps_patch_head_frozen_after_stage_one(self):
         _, target = _transferred_builder("abmil_patch_hardneg_guided")
+
+        target.make_backbone_partially_trainable(trainable_fraction=0.5, learning_rate=1e-4)
+
+        self.assertFalse(target.model.get_layer("td_instance_dense").layer.trainable)
+        self.assertFalse(target.model.get_layer("td_instance_output").layer.trainable)
+
+    def test_learned_gate_starts_small_and_is_trainable(self):
+        features = tf.constant([[[1.0, 0.0], [0.0, 2.0], [3.0, 1.0]]])
+        guide_logits = tf.constant([[[-1.0], [0.0], [2.0]]])
+        layer = LearnedGuidedGatedAttentionPooling(
+            attention_dim=3,
+            guide_temperature=1.0,
+            initial_guide_gate=0.05,
+        )
+
+        layer([features, guide_logits])
+
+        self.assertAlmostEqual(float(layer.guide_gate.numpy()), 0.05, places=5)
+        self.assertTrue(layer.raw_guide_gate.trainable)
+
+    def test_alltiles_gated_unfreezes_transferred_layers_coherently(self):
+        _, target = _transferred_builder("abmil_patch_alltiles_gated")
 
         target.make_backbone_partially_trainable(trainable_fraction=0.5, learning_rate=1e-4)
 
         self.assertTrue(target.model.get_layer("td_instance_dense").layer.trainable)
         self.assertTrue(target.model.get_layer("td_instance_output").layer.trainable)
 
+    def test_patch_score_is_an_optional_instance_feature(self):
+        source, target = _transferred_builder("abmil_patch_alltiles_score")
+
+        source_output = source.model.get_layer("output").get_weights()
+        instance_output = target.model.get_layer("td_instance_output").layer
+        np.testing.assert_allclose(instance_output.get_weights()[0], source_output[0])
+        self.assertIn(
+            "instance_features_with_patch_score",
+            {layer.name for layer in target.model.layers},
+        )
+
     def test_guided_mode_normalization_and_dispatch(self):
         self.assertEqual(normalize_mode("ABMIL-PATCH-HARDNEG-GUIDED"), "abmil_patch_hardneg_guided")
         self.assertTrue(is_mil_mode("abmil_patch_hardneg_guided"))
+        self.assertEqual(normalize_mode("PATCH-ALLTILES"), "patch_alltiles")
+        self.assertTrue(is_mil_mode("abmil_patch_alltiles_gated"))
 
 
 if __name__ == "__main__":

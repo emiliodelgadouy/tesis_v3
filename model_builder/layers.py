@@ -1,3 +1,5 @@
+import math
+
 import tensorflow as tf
 from tensorflow.keras import layers
 
@@ -84,6 +86,77 @@ class GuidedGatedAttentionPooling(GatedAttentionPooling):
     def get_config(self):
         config = super().get_config()
         config.update({"guide_temperature": self.guide_temperature, "guide_strength": self.guide_strength})
+        return config
+
+
+class LearnedGuidedGatedAttentionPooling(GatedAttentionPooling):
+    """Atención residual con una compuerta aprendible para la guía patch.
+
+    La compuerta empieza cerca de cero para que el modelo no quede obligado a
+    seguir logits patch mal calibrados. Su valor queda acotado a ``[0, 1]`` y
+    puede inspeccionarse mediante :attr:`guide_gate`.
+    """
+
+    def __init__(
+        self,
+        attention_dim=128,
+        gated=True,
+        guide_temperature=1.0,
+        initial_guide_gate=0.05,
+        **kwargs,
+    ):
+        if guide_temperature <= 0:
+            raise ValueError("guide_temperature debe ser mayor que cero")
+        if not 0.0 < initial_guide_gate < 1.0:
+            raise ValueError("initial_guide_gate debe estar estrictamente entre 0 y 1")
+        kwargs.setdefault("attention_initializer", "zeros")
+        super().__init__(attention_dim=attention_dim, gated=gated, **kwargs)
+        self.guide_temperature = float(guide_temperature)
+        self.initial_guide_gate = float(initial_guide_gate)
+        self.last_guide_attention = None
+
+    def build(self, input_shape):
+        feature_shape, guide_shape = input_shape
+        if guide_shape[-1] != 1:
+            raise ValueError(f"guide_logits debe tener ultima dimension 1; recibido {guide_shape}")
+        super().build(feature_shape)
+        initial_logit = math.log(self.initial_guide_gate / (1.0 - self.initial_guide_gate))
+        self.raw_guide_gate = self.add_weight(
+            name="raw_guide_gate",
+            shape=(),
+            initializer=tf.keras.initializers.Constant(initial_logit),
+            trainable=True,
+            dtype="float32",
+        )
+
+    @property
+    def guide_gate(self):
+        return tf.math.sigmoid(self.raw_guide_gate)
+
+    def call(self, inputs):
+        features, guide_logits = inputs
+        h = tf.cast(features, tf.float32)
+        guide_logits = tf.cast(guide_logits, tf.float32)
+        scaled_guide = guide_logits / self.guide_temperature
+        guide_attention = tf.nn.softmax(scaled_guide, axis=1)
+        attention_logits = self.attention_logits(h) + self.guide_gate * scaled_guide
+        attention = tf.nn.softmax(attention_logits, axis=1)
+        self.last_guide_attention = guide_attention
+        self.last_attention = attention
+        return tf.reduce_sum(attention * h, axis=1)
+
+    def compute_output_shape(self, input_shape):
+        feature_shape, _ = input_shape
+        return (feature_shape[0], feature_shape[-1])
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "guide_temperature": self.guide_temperature,
+                "initial_guide_gate": self.initial_guide_gate,
+            }
+        )
         return config
 
 
