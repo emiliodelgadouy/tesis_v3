@@ -32,11 +32,33 @@ from src.comet_logging import (
 )
 from src.dataset import download_and_build_dataset
 from src.dataset_provider import as_tf_dataset, build_dataset_provider, hard_negatives_from_positives
+from src.evaluation_report import (
+    bootstrap_metrics_by_patient,
+    compute_metrics,
+    select_validation_thresholds,
+)
 from src.experiment import run_training_experiment
 from src.guide_diagnostics import PatchGuideLocalizationResult, evaluate_patch_guide_localization
 from src.imports import set_random_seeds
 from src.modes import normalize_mode
 from src.model_builder import ModelBuilder
+from src.targets import (
+    BIRADS_NEGATIVE,
+    BIRADS_POSITIVE,
+    resolve_target_mode,
+    source_frame_name,
+    target_masks,
+    validate_birads_labels,
+)
+from src.target_ab import (
+    apply_patient_split_manifest,
+    assert_disjoint_patients,
+    build_patient_split_manifest,
+    load_patient_split_manifest,
+    save_patient_split_manifest,
+    undersample_training_negatives,
+)
+from src.target_preflight import validate_ab_preflight
 from src.utils import (
     TrainingTimer,
     apply_probability_threshold,
@@ -84,6 +106,10 @@ __all__ = [
     "as_tf_dataset",
     "build_dataset_provider",
     "hard_negatives_from_positives",
+    # evaluation
+    "bootstrap_metrics_by_patient",
+    "compute_metrics",
+    "select_validation_thresholds",
     # experiment
     "run_training_experiment",
     # guide_diagnostics
@@ -94,6 +120,21 @@ __all__ = [
     "normalize_mode",
     # model_builder
     "ModelBuilder",
+    # targets
+    "BIRADS_NEGATIVE",
+    "BIRADS_POSITIVE",
+    "resolve_target_mode",
+    "source_frame_name",
+    "target_masks",
+    "validate_birads_labels",
+    # target A/B
+    "apply_patient_split_manifest",
+    "assert_disjoint_patients",
+    "build_patient_split_manifest",
+    "load_patient_split_manifest",
+    "save_patient_split_manifest",
+    "undersample_training_negatives",
+    "validate_ab_preflight",
     # utils
     "TrainingTimer",
     "apply_probability_threshold",

@@ -17,6 +17,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 from tensorflow import keras
 
 from src.dataset import (
+    ALL_FINDING_COLUMNS,
     DEFAULT_CLS_POSITIVE_COLUMNS,
     DEFAULT_FILTER_COLUMNS,
     DatasetConfig,
@@ -29,6 +30,7 @@ from src.dataset_provider import (
     decode_image,
     hard_negatives_from_positives,
 )
+from src.targets import resolve_target_mode, source_frame_name, target_masks
 
 DEFAULT_ROI_NORM_COLUMNS: tuple[str, str, str, str] = (
     "pad_resized_xmin_norm",
@@ -242,7 +244,7 @@ def deduplicate_images(
     if flag_columns is None:
         flag_columns = tuple(
             c
-            for c in (*DEFAULT_FILTER_COLUMNS, *DEFAULT_CLS_POSITIVE_COLUMNS)
+            for c in (*ALL_FINDING_COLUMNS, *DEFAULT_CLS_POSITIVE_COLUMNS)
             if c in out.columns
         )
 
@@ -301,35 +303,36 @@ def prepare_dataset(config):
     """Descarga/arma el dataset y lo etiqueta en positivos/negativos.
 
     Une ``download_and_build_dataset`` (I/O + columna ``cls``) con
-    ``build_positive_negative_dataset`` (split segun ``POSITIVE_MODE``) y devuelve
+    ``build_positive_negative_dataset`` (split segun ``TARGET_MODE``) y devuelve
     el DataFrame binario listo para hacer los splits.
     """
     data = download_and_build_dataset(config)
-    return build_positive_negative_dataset(config, data["ds"])
+    target_mode = resolve_target_mode(config)
+    # BI-RADS debe considerar el universo completo, incluso si en otro dataset
+    # futuro el filtro legacy de findings excluyera filas.
+    source = data[source_frame_name(target_mode)]
+    return build_positive_negative_dataset(config, source)
 
 
 def build_positive_negative_dataset(config, ds):
-    """Arma el dataset binario positivos/negativos segun ``POSITIVE_MODE``.
+    """Arma el dataset binario positivos/negativos segun ``TARGET_MODE``.
 
     - "mass": positivos = imagenes con ``Mass==1`` (tarea "deteccion de masas").
       Las imagenes con otro hallazgo pero sin masa se DESCARTAN (no son ni
       positivo ni negativo limpio).
     - "full": cualquier hallazgo cuenta como positivo (``cls==1``); no se descarta
       ninguna fila (positivos U negativos = dataset completo).
+    - "birads_recall": BI-RADS 1-2 negativo y BI-RADS 3-5 positivo. No filtra
+      por finding.
 
     Deduplica por imagen, fuerza ``cls`` a 1.0/0.0 y quita de los negativos las
     imagenes que ya aparecen como positivas (mismo patient_id/image_id).
     """
-    positive_mode = config["GENERAL"]["POSITIVE_MODE"]
-    if positive_mode == "mass":
-        positive_mask = ds["Mass"] == 1
-    elif positive_mode == "full":
-        positive_mask = ds["cls"] == 1
-    else:
-        raise ValueError(f"POSITIVE_MODE desconocido: {positive_mode!r} (usar 'mass' o 'full')")
+    target_mode = resolve_target_mode(config)
+    positive_mask, negative_mask = target_masks(ds, target_mode)
 
     ds_finding = deduplicate_images(ds[positive_mask].copy())
-    ds_no_finding = deduplicate_images(ds[ds["cls"] == 0].copy())
+    ds_no_finding = deduplicate_images(ds[negative_mask].copy())
     ds_finding["cls"] = 1.0
     ds_no_finding["cls"] = 0.0
 
@@ -341,7 +344,7 @@ def build_positive_negative_dataset(config, ds):
     )
     ds = pd.concat([ds_finding, ds_no_finding], ignore_index=True)
     print(
-        f"POSITIVE_MODE={positive_mode}: {len(ds_finding)} positivos / "
+        f"TARGET_MODE={target_mode}: {len(ds_finding)} positivos / "
         f"{len(ds_no_finding)} negativos ({len(ds)} total)"
     )
     return ds
@@ -485,7 +488,8 @@ def save_dataset_splits(
         "n_val": int(len(val)),
         "n_test": int(len(test)),
         "random_seed": general["RANDOM_SEED"],
-        "positive_mode": general["POSITIVE_MODE"],
+        "positive_mode": general.get("POSITIVE_MODE"),
+        "target_mode": resolve_target_mode(config),
         "validation_split_ratio": general["VALIDATION_SPLIT_RATIO"],
         "no_finding_to_finding_ratio": general["NO_FINDING_TO_FINDING_RATIO"],
         "reduced_dataset": general["REDUCED_DATASET"],

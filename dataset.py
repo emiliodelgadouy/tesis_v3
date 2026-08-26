@@ -26,6 +26,14 @@ DEFAULT_CLS_POSITIVE_COLUMNS = (
     "Suspicious_Calcification",
 )
 
+ALL_FINDING_COLUMNS = (
+    "Architectural_Distortion",
+    "Asymmetry",
+    "Focal_Asymmetry",
+    "Global_Asymmetry",
+    *DEFAULT_FILTER_COLUMNS,
+)
+
 
 @dataclass
 class DatasetConfig:

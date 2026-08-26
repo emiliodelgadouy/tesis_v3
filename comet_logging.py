@@ -108,8 +108,10 @@ def start_training_experiment(
     model=None,
 ):
     project_name = config["COMET"]["PROJECT_NAME"]
+    online = config["COMET"].get("ONLINE")
     experiment = comet_ml.start(
         project_name=project_name,
+        online=online,
         experiment_config=comet_ml.ExperimentConfig(
             name=experiment_name,
             auto_metric_logging=False,

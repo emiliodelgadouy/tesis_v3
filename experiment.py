@@ -33,6 +33,7 @@ from src.utils import (
     resample_train_for_patch,
     resolve_steps_per_execution,
     run_training_stage,
+    sample_memory_usage,
     threshold_recall_target,
     threshold_youden_j,
 )
@@ -94,6 +95,21 @@ def _export_predictions(
             "path",
             "view",
             "laterality",
+            "breast_birads",
+            "breast_density",
+            "density",
+            "finding_categories",
+            "Mass",
+            "Suspicious_Lymph_Node",
+            "Nipple_Retraction",
+            "Skin_Retraction",
+            "Skin_Thickening",
+            "Suspicious_Calcification",
+            "Architectural_Distortion",
+            "Asymmetry",
+            "Focal_Asymmetry",
+            "Global_Asymmetry",
+            "No_Finding",
             "cls",
             "_bag_cls",
             "_patch_tile_index",
@@ -226,6 +242,13 @@ def run_training_experiment(
         focal_alpha = n_neg / len(train_df)
         bias = logit_initial_bias(n_pos, n_neg)
 
+    # Un A/B controlado puede fijar estos dos valores para que la prevalencia
+    # inducida por el target no cambie también la loss o la inicialización.
+    if training.get("FOCAL_ALPHA") is not None:
+        focal_alpha = float(training["FOCAL_ALPHA"])
+    if training.get("INITIAL_BIAS") is not None:
+        bias = float(training["INITIAL_BIAS"])
+
     try:
         if pretrained_builder is not None:
             input_size = pretrained_builder.IMG_SIZE
@@ -316,6 +339,8 @@ def run_training_experiment(
             "BATCH_SIZE": batch_size,
             "CACHE_DATASET": cache_dataset,
             "JIT_COMPILE": True,
+            "FOCAL_ALPHA_EFFECTIVE": focal_alpha,
+            "INITIAL_BIAS_EFFECTIVE": bias,
         }
         if mode in ("patch", "patch_hardneg", "patch_alltiles"):
             run_config["PATCH_ALIGN_TO_BAG_GRID"] = patch_align_to_bag_grid
@@ -514,6 +539,13 @@ def run_training_experiment(
         evaluation_cfg = config.get("EVALUATION") or {}
         prediction_paths = {}
         if evaluation_cfg.get("EXPORT_PREDICTIONS", False):
+            prediction_paths["train"] = _export_predictions(
+                exp_name,
+                "train",
+                train_df,
+                y_train_true,
+                y_train_prob,
+            )
             prediction_paths["val"] = _export_predictions(
                 exp_name,
                 "val",
@@ -595,13 +627,21 @@ def run_training_experiment(
                 "test_roc_auc": float(roc_auc_score(y_test_true, y_test_prob)),
                 "test_pr_auc": float(average_precision_score(y_test_true, y_test_prob)),
                 "thr_youden": float(thr_youden),
+                "training_wall_seconds": float(
+                    training_timer.elapsed_since_training_start()
+                ),
                 "comet_url": comet_url,
                 **bootstrap_intervals,
                 **branch_diagnostics,
+                **sample_memory_usage(),
             }
+            for stage, stage_summary in training_timer.stage_summaries.items():
+                for key, value in stage_summary.items():
+                    summary[f"stage_{stage}_{key}"] = float(value)
             if str(best_global_checkpoint["monitor"]) == "val_auc":
                 summary["val_best_auc"] = float(best_global_checkpoint["value"])
             if prediction_paths:
+                summary["train_predictions_file"] = str(prediction_paths["train"])
                 summary["val_predictions_file"] = str(prediction_paths["val"])
                 summary["test_predictions_file"] = str(
                     prediction_paths["test"]
